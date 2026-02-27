@@ -1,0 +1,7 @@
+.git
+.gitignore
+.next
+.wwebjs_auth
+node_modules
+npm-debug.log
+.env

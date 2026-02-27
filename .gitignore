@@ -1,0 +1,17 @@
+node_modules
+
+# Next.js build and cache
+.next
+out
+.turbo
+
+# WhatsApp Web JS auth/session data
+.wwebjs_auth
+.wwebjs_cache
+
+# Env and logs
+.env
+.env.local
+.env.*.local
+*.log
+.env
