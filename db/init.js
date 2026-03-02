@@ -329,6 +329,7 @@ async function createSchema(client) {
       user_id INT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
       requirement_text TEXT NOT NULL,
       category VARCHAR(100),
+      reason_of_contacting TEXT,
       status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'in_progress', 'completed')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -499,12 +500,13 @@ async function createSchema(client) {
 }
 
 export async function initDatabase({ recreate = false } = {}) {
+  let client = null;
   try {
     if (!DATABASE_URL) {
       throw new Error("DATABASE_URL is required for Postgres");
     }
 
-    const client = new Client({
+    client = new Client({
       connectionString: DATABASE_URL,
       ssl: { rejectUnauthorized: false },
     });
@@ -525,9 +527,19 @@ export async function initDatabase({ recreate = false } = {}) {
     await client.query("COMMIT");
 
     console.log("✅ Database schema is ready");
-    await client.end();
   } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {
+        // Ignore rollback failures to preserve original error.
+      }
+    }
     console.error("❌ Database init failed:", err.message);
-    process.exit(1);
+    throw err;
+  } finally {
+    if (client) {
+      await client.end().catch(() => {});
+    }
   }
 }

@@ -13,5 +13,38 @@ out
 .env
 .env.local
 .env.*.local
+.env.development
+.env.production
+.env.staging
 *.log
-.env
+
+# Test coverage
+coverage
+.nyc_output
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp
+temp
+*.tmp
+
+# Build artifacts
+dist
+build
+
+# Documentation files (keep in repo)
+!PROJECT_PROS.md
+!PROJECT_CONS.md
+!IMPROVEMENT_ROADMAP.md
+!PRODUCTION_READINESS_GUIDE.md
+!PRODUCTION_READINESS_SUMMARY.md

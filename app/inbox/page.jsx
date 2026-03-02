@@ -43,6 +43,8 @@ const QUICK_REPLIES = [
 ];
 
 const normalizeText = (value) => String(value || '').toLowerCase();
+const isUnreadIncoming = (msg) =>
+  msg?.message_type === 'incoming' && msg?.status !== 'read';
 
 const formatTime = (value) => {
   if (!value) return '—';
@@ -203,7 +205,7 @@ export default function InboxPage() {
   const stats = useMemo(() => {
     const now = Date.now();
     const uniqueThreads = new Set(messages.map((msg) => msg.user_id)).size;
-    const unreadMessages = messages.filter((msg) => msg.status !== 'read').length;
+    const unreadMessages = messages.filter((msg) => isUnreadIncoming(msg)).length;
     const incomingToday = messages.filter(
       (msg) =>
         msg.message_type === 'incoming' &&
@@ -217,7 +219,7 @@ export default function InboxPage() {
         if (!current.last || msgTime > current.last.time) {
           current.last = { time: msgTime, type: msg.message_type };
         }
-        if (msg.status !== 'read') current.unread += 1;
+        if (isUnreadIncoming(msg)) current.unread += 1;
         map.set(msg.user_id, current);
       });
       let count = 0;
@@ -251,7 +253,7 @@ export default function InboxPage() {
         messageCount: 0,
       };
       existing.messageCount += 1;
-      if (msg.status !== 'read') existing.unreadCount += 1;
+      if (isUnreadIncoming(msg)) existing.unreadCount += 1;
       if (msg.message_type === 'incoming') existing.incomingCount += 1;
       if (!existing.lastTime || time > existing.lastTime) {
         existing.lastTime = time;

@@ -279,7 +279,7 @@ export default function DashboardPage() {
 					Control what the AI is allowed to say. These rules apply to WhatsApp auto-replies.
 				</p>
 				<p className="text-xs text-gray-500 mb-6">
-					Requires <span className="font-semibold">GEMINI_API_KEY</span> on the backend.
+					Requires <span className="font-semibold">OPENROUTER_API_KEY</span> on the backend.
 				</p>
 				<div className="flex items-center gap-3 mb-6">
 					<input

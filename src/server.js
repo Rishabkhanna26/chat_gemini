@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import http from "node:http";
 import fs from "node:fs/promises";
+import compression from "compression";
 import { Server } from "socket.io";
 import { verifyAuthToken } from "../lib/auth.js";
 import { initializeDbHelpers } from "../lib/db-helpers.js";
@@ -12,11 +13,37 @@ import {
   whatsappEvents,
   sendAdminMessage,
 } from "./whatsapp.js";
+import { initSentry, sentryErrorHandler } from "../config/sentry.js";
+import logger from "../config/logger.js";
+import {
+  apiRateLimiter,
+  authRateLimiter,
+  whatsappRateLimiter,
+  securityHeaders,
+  requestLogger,
+} from "../middleware/security.js";
+// Import graceful shutdown handler (Task 10.4)
+import "./shutdown.js";
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+
+// Initialize Sentry (must be first)
+initSentry(app);
+
+// Security headers
+app.use(securityHeaders);
+
+// Compression
+app.use(compression());
+
+// Body parsing with size limits
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request logging
+app.use(requestLogger);
 
 const DEFAULT_PORT = 3001;
 const BASE_PORT = Number(process.env.PORT) || DEFAULT_PORT;
@@ -106,7 +133,22 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("Backend running ✅");
+  res.json({ 
+    status: 'ok',
+    message: 'Backend running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({
+    status: 'healthy',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    memory: process.memoryUsage(),
+  });
 });
 
 app.get("/health/storage", async (req, res) => {
@@ -136,22 +178,30 @@ app.get("/health/storage", async (req, res) => {
   }
 });
 
-app.use("/whatsapp", requireBackendAuth);
+app.use("/whatsapp", requireBackendAuth, whatsappRateLimiter);
 
 app.get("/whatsapp/status", (req, res) => {
-  res.json(getWhatsAppState(getScopedAdminIdFromRequest(req)));
+  try {
+    const state = getWhatsAppState(getScopedAdminIdFromRequest(req));
+    res.json(state);
+  } catch (err) {
+    logger.error("Failed to get WhatsApp status", { error: err.message });
+    res.status(500).json({ error: "Failed to get status" });
+  }
 });
 
 app.post("/whatsapp/start", async (req, res) => {
   try {
     const result = await startWhatsApp(getScopedAdminIdFromRequest(req));
     if (result?.error) {
+      logger.warn("WhatsApp start failed", { error: result.error, adminId: getScopedAdminIdFromRequest(req) });
       res.status(400).json(result);
       return;
     }
+    logger.info("WhatsApp started successfully", { adminId: getScopedAdminIdFromRequest(req) });
     res.json(result);
   } catch (err) {
-    console.error("❌ Failed to start WhatsApp:", err);
+    logger.error("Failed to start WhatsApp", { error: err.message, stack: err.stack });
     res.status(500).json({ error: "Failed to start WhatsApp" });
   }
 });
@@ -160,12 +210,14 @@ app.post("/whatsapp/disconnect", async (req, res) => {
   try {
     const result = await stopWhatsApp(getScopedAdminIdFromRequest(req));
     if (result?.error) {
+      logger.warn("WhatsApp disconnect failed", { error: result.error, adminId: getScopedAdminIdFromRequest(req) });
       res.status(400).json(result);
       return;
     }
+    logger.info("WhatsApp disconnected successfully", { adminId: getScopedAdminIdFromRequest(req) });
     res.json(result);
   } catch (err) {
-    console.error("❌ Failed to disconnect WhatsApp:", err);
+    logger.error("Failed to disconnect WhatsApp", { error: err.message, stack: err.stack });
     res.status(500).json({ error: "Failed to disconnect WhatsApp" });
   }
 });
@@ -253,15 +305,42 @@ const enableRedisAdapter = async (ioServer) => {
 
 try {
   await initializeDbHelpers();
-  console.log("✅ Database helpers initialized");
+  logger.info("Database helpers initialized");
 } catch (err) {
-  console.warn(
-    "⚠️ Database helpers initialization skipped at startup (will retry later):",
-    err?.message || err
-  );
+  logger.warn("Database helpers initialization skipped at startup (will retry later)", {
+    error: err?.message || err
+  });
 }
 
 await enableRedisAdapter(io);
+
+// Error handling middleware (must be after all routes)
+app.use(sentryErrorHandler());
+
+// 404 handler
+app.use((req, res) => {
+  logger.warn("Route not found", { path: req.path, method: req.method });
+  res.status(404).json({
+    error: "Not Found",
+    message: "The requested resource was not found",
+    path: req.path,
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  logger.error("Unhandled error", {
+    error: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+  });
+  
+  res.status(err.status || 500).json({
+    error: "Internal Server Error",
+    message: process.env.NODE_ENV === 'development' ? err.message : "An error occurred",
+  });
+});
 
 io.on("connection", (socket) => {
   const adminId = parseAdminId(socket.data?.adminId);
@@ -308,20 +387,40 @@ const startServer = (port) => {
     const normalized =
       publicUrl && publicUrl.endsWith("/") ? publicUrl.slice(0, -1) : publicUrl;
     const logUrl = normalized || `http://localhost:${port}`;
-    console.log(`🚀 Backend running on ${logUrl}`);
+    logger.info(`Backend running on ${logUrl}`, {
+      port,
+      environment: process.env.NODE_ENV || 'development',
+    });
   });
 };
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
     const nextPort = currentPort + 1;
-    console.warn(`⚠️ Port ${currentPort} in use, trying ${nextPort}...`);
+    logger.warn(`Port ${currentPort} in use, trying ${nextPort}...`);
     currentPort = nextPort;
     setTimeout(() => startServer(currentPort), 200);
     return;
   }
-  console.error("❌ Server error:", err);
+  logger.error("Server error", { error: err.message, code: err.code });
   process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    logger.info('Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received, shutting down gracefully...');
+  server.close(() => {
+    logger.info('Server closed');
+    process.exit(0);
+  });
 });
 
 startServer(currentPort);

@@ -417,8 +417,14 @@ export default function ContactsPage() {
               ) : (
                 <div className="space-y-3">
                   <div className="p-4 border border-gray-200 rounded-lg">
-                    <p className="text-xs text-aa-gray uppercase mb-1">Lead Reason</p>
+                    <p className="text-xs text-aa-gray uppercase mb-1">Reason Of Contacting</p>
                     <p className="font-semibold text-aa-text-dark mb-2">
+                      {latestRequirement.reason_of_contacting || latestRequirement.requirement_text || '—'}
+                    </p>
+                  </div>
+                  <div className="p-4 border border-gray-200 rounded-lg">
+                    <p className="text-xs text-aa-gray uppercase mb-1">Conversation Summary</p>
+                    <p className="text-sm text-aa-text-dark whitespace-pre-wrap">
                       {latestRequirement.requirement_text || '—'}
                     </p>
                   </div>
