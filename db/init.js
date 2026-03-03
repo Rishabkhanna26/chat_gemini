@@ -193,6 +193,8 @@ async function createUpdatedAtInfrastructure(client) {
     "tasks",
     "appointments",
     "orders",
+    "order_revenue",
+    "order_payment_link_timers",
     "broadcasts",
     "templates",
     "catalog_items",
@@ -216,6 +218,8 @@ async function recreateSchema(client) {
     "DROP TABLE IF EXISTS appointment_billing CASCADE",
     "DROP TABLE IF EXISTS order_payments CASCADE",
     "DROP TABLE IF EXISTS order_billing CASCADE",
+    "DROP TABLE IF EXISTS order_payment_link_timers CASCADE",
+    "DROP TABLE IF EXISTS order_revenue CASCADE",
     "DROP TABLE IF EXISTS tasks CASCADE",
     "DROP TABLE IF EXISTS leads CASCADE",
     "DROP TABLE IF EXISTS messages CASCADE",
@@ -267,6 +271,14 @@ async function createSchema(client) {
       ai_enabled BOOLEAN DEFAULT FALSE,
       ai_prompt TEXT,
       ai_blocklist TEXT,
+      appointment_start_hour SMALLINT NOT NULL DEFAULT 9
+        CHECK (appointment_start_hour >= 0 AND appointment_start_hour <= 23),
+      appointment_end_hour SMALLINT NOT NULL DEFAULT 20
+        CHECK (appointment_end_hour >= 1 AND appointment_end_hour <= 24),
+      appointment_slot_minutes SMALLINT NOT NULL DEFAULT 60
+        CHECK (appointment_slot_minutes >= 15 AND appointment_slot_minutes <= 240),
+      appointment_window_months SMALLINT NOT NULL DEFAULT 3
+        CHECK (appointment_window_months >= 1 AND appointment_window_months <= 24),
       reset_token_hash TEXT,
       reset_expires_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -417,6 +429,56 @@ async function createSchema(client) {
     `CREATE INDEX IF NOT EXISTS orders_status_idx ON orders (status)`,
     `CREATE INDEX IF NOT EXISTS orders_fulfillment_idx ON orders (fulfillment_status)`,
     `CREATE INDEX IF NOT EXISTS orders_payment_status_idx ON orders (payment_status)`,
+
+    `
+    CREATE TABLE IF NOT EXISTS order_revenue (
+      id SERIAL PRIMARY KEY,
+      order_id INT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+      admin_id INT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+      channel VARCHAR(50) DEFAULT 'WhatsApp',
+      payment_currency VARCHAR(10) DEFAULT 'INR',
+      booked_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+      collected_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+      outstanding_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+      payment_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (payment_status IN ('pending', 'paid', 'failed', 'refunded')),
+      payment_method VARCHAR(30),
+      revenue_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      placed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT order_revenue_booked_nonneg CHECK (booked_amount >= 0),
+      CONSTRAINT order_revenue_collected_nonneg CHECK (collected_amount >= 0),
+      CONSTRAINT order_revenue_outstanding_nonneg CHECK (outstanding_amount >= 0)
+    )
+    `,
+    `CREATE INDEX IF NOT EXISTS order_revenue_admin_date_idx ON order_revenue (admin_id, revenue_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS order_revenue_channel_idx ON order_revenue (channel)`,
+    `CREATE INDEX IF NOT EXISTS order_revenue_payment_status_idx ON order_revenue (payment_status)`,
+
+    `
+    CREATE TABLE IF NOT EXISTS order_payment_link_timers (
+      order_id INT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+      admin_id INT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+      scheduled_for TIMESTAMPTZ NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'scheduled'
+        CHECK (status IN ('scheduled', 'processing', 'sent', 'failed', 'cancelled')),
+      attempts INT NOT NULL DEFAULT 0,
+      max_attempts INT NOT NULL DEFAULT 3,
+      last_error TEXT,
+      payload_json JSONB,
+      last_payment_link_id VARCHAR(120),
+      created_by INT REFERENCES admins(id) ON DELETE SET NULL,
+      processing_started_at TIMESTAMPTZ,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT order_payment_link_timers_attempts_nonneg CHECK (attempts >= 0),
+      CONSTRAINT order_payment_link_timers_max_attempts_positive CHECK (max_attempts >= 1)
+    )
+    `,
+    `CREATE INDEX IF NOT EXISTS order_payment_link_timers_status_due_idx ON order_payment_link_timers (status, scheduled_for ASC)`,
+    `CREATE INDEX IF NOT EXISTS order_payment_link_timers_admin_idx ON order_payment_link_timers (admin_id, status)`,
 
     `
     CREATE TABLE IF NOT EXISTS broadcasts (

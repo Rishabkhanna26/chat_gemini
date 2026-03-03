@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
@@ -15,6 +16,7 @@ import {
   faCalendarCheck,
   faBoxOpen,
   faCartShopping,
+  faWallet,
   faChevronLeft,
   faChevronRight,
   faXmark,
@@ -74,6 +76,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onClo
     { name: 'Leads', icon: faUsers, path: '/contacts' },
     { name: catalogLabel, icon: faBoxOpen, path: '/catalog' },
     ...(showOrders ? [{ name: 'Orders', icon: faCartShopping, path: '/orders' }] : []),
+    ...(showOrders ? [{ name: 'Revenue', icon: faWallet, path: '/revenue' }] : []),
     ...(showAppointments ? [{ name: 'Appointments', icon: faCalendarCheck, path: '/appointments' }] : []),
     { name: 'Reports', icon: faChartBar, path: '/reports' },
     { name: 'Admins', icon: faUserGroup, path: '/admins', roles: ['super_admin'] },
@@ -96,14 +99,19 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onClo
     >
       {/* Logo */}
       <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between">
-        {showLabels && (
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-aa-orange rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-xl">A</span>
-            </div>
-            <span className="text-white font-bold text-xl">AlgoAura</span>
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="h-10 w-10 rounded-lg overflow-hidden bg-white/10 border border-white/15 flex items-center justify-center shrink-0">
+            <Image
+              src="/algoaura_logo.png"
+              alt="AlgoAura logo"
+              width={40}
+              height={40}
+              className="h-full w-full object-contain"
+              priority
+            />
           </div>
-        )}
+          {showLabels && <span className="text-white font-bold text-xl truncate">AlgoAura</span>}
+        </div>
         {mobileOpen && (
           <button
             type="button"

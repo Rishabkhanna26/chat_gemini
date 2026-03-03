@@ -1,7 +1,9 @@
 import pkg from "whatsapp-web.js";
 import qrcode from "qrcode-terminal";
 import qrImage from "qrcode";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import {
   addDays,
   addMinutes,
@@ -22,10 +24,18 @@ import {
   sanitizePhone,
   sanitizeText,
 } from "../lib/sanitize.js";
+import {
+  createRazorpayPaymentLink,
+  verifyRazorpayPaymentLink,
+  isRazorpayConfigured,
+  normalizeRazorpayAmount,
+  normalizeRazorpayCurrency,
+} from "../lib/razorpay.js";
+import { syncOrderRevenueByOrderId } from "../lib/db-helpers.js";
 import { sessionStateManager, recoveryManager } from "./persistence/index.js";
 import logger from "../config/logger.js";
 
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 export const whatsappEvents = new EventEmitter();
 
 /* ===============================
@@ -158,13 +168,29 @@ const getAdminAISettings = async (adminId) => {
   if (cached && now - cached.at < AI_SETTINGS_TTL_MS) {
     return cached.data;
   }
-  const [rows] = await db.query(
-    `SELECT ai_enabled, ai_prompt, ai_blocklist
-     FROM admins
-     WHERE id = ?
-     LIMIT 1`,
-    [adminId]
-  );
+  let rows;
+  try {
+    [rows] = await db.query(
+      `SELECT ai_enabled, ai_prompt, ai_blocklist,
+              appointment_start_hour, appointment_end_hour,
+              appointment_slot_minutes, appointment_window_months
+       FROM admins
+       WHERE id = ?
+       LIMIT 1`,
+      [adminId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error)) {
+      throw error;
+    }
+    [rows] = await db.query(
+      `SELECT ai_enabled, ai_prompt, ai_blocklist
+       FROM admins
+       WHERE id = ?
+       LIMIT 1`,
+      [adminId]
+    );
+  }
   const data = rows[0] || { ai_enabled: false, ai_prompt: null, ai_blocklist: null };
   aiSettingsCache.set(adminId, { at: now, data });
   return data;
@@ -251,7 +277,11 @@ const EXECUTIVE_KEYWORDS = [
   "support",
   "baat",
   "help",
+  "owner",
+  "manager",
 ];
+const OWNER_MANAGER_KEYWORDS = ["owner", "manager", "management", "boss", "proprietor"];
+const IMMEDIATE_CALLBACK_KEYWORDS = ["right now", "asap", "immediately", "urgent", "abhi"];
 const TRACK_ORDER_KEYWORDS = [
   "track",
   "tracking",
@@ -263,7 +293,26 @@ const TRACK_ORDER_KEYWORDS = [
 ];
 const YES_KEYWORDS = ["yes", "y", "haan", "ha", "ok", "okay", "confirm", "1"];
 const NO_KEYWORDS = ["no", "n", "2", "other", "view other", "change"];
+const buildRazorpayCallbackUrl = () => {
+  const explicit = String(process.env.RAZORPAY_CALLBACK_URL || "").trim();
+  if (explicit) return explicit;
+  const frontendOrigin = String(process.env.FRONTEND_ORIGIN || "http://localhost:3000").trim();
+  try {
+    return new URL("/payment/success", frontendOrigin).toString();
+  } catch (_error) {
+    return "";
+  }
+};
 const PAYMENT_LINK = process.env.WHATSAPP_PAYMENT_LINK || "";
+const RAZORPAY_CURRENCY = normalizeRazorpayCurrency(process.env.RAZORPAY_CURRENCY || "INR");
+const RAZORPAY_DESCRIPTION =
+  sanitizeText(process.env.RAZORPAY_PAYMENT_DESCRIPTION || "WhatsApp order payment", 120) ||
+  "WhatsApp order payment";
+const RAZORPAY_CALLBACK_URL = buildRazorpayCallbackUrl();
+const RAZORPAY_CALLBACK_METHOD =
+  String(process.env.RAZORPAY_CALLBACK_METHOD || "get").trim().toLowerCase() === "post"
+    ? "post"
+    : "get";
 
 const parseCatalogKeywords = (value) => {
   if (!value) return [];
@@ -408,6 +457,24 @@ const formatInr = (value) => {
   }
 };
 
+const formatCurrencyAmount = (value, currency = "INR") => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "N/A";
+  const normalizedCurrency = normalizeRazorpayCurrency(currency);
+  if (normalizedCurrency === "INR") {
+    return formatInr(amount);
+  }
+  try {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: normalizedCurrency,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch (_error) {
+    return `${normalizedCurrency} ${amount.toFixed(2)}`;
+  }
+};
+
 const buildProductSelectionMessage = (automation) =>
   automation?.productsMenuText ||
   [
@@ -476,10 +543,80 @@ const computeProductTotal = (product, quantity) => {
   return unit * qty;
 };
 
-const buildOrderSummaryMessage = (user) => {
+const getOrderTotalAmount = (user) => {
   const product = user?.data?.selectedProduct || {};
   const quantity = Number(user?.data?.productQuantity || 1);
   const total = computeProductTotal(product, quantity);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  return Number(total.toFixed(2));
+};
+
+const buildPaymentMethodPrompt = () =>
+  [
+    "Payment Method:",
+    "1️⃣ Cash on Delivery",
+    "2️⃣ Pay Full Amount Now",
+    "3️⃣ Pay Partial Amount Now",
+  ].join("\n");
+
+const DELIVERY_PHONE_PROMPT =
+  "Share an alternate phone number for delivery updates, or type *SAME* to use this WhatsApp number.";
+
+const shouldUseSameDeliveryPhone = (input) => {
+  const normalized = normalizeComparableText(input);
+  if (!normalized) return false;
+  return (
+    [
+      "same",
+      "same number",
+      "use same",
+      "this number",
+      "use this number",
+      "no",
+      "na",
+      "n/a",
+      "skip",
+      "continue",
+    ].includes(normalized) ||
+    normalized.includes("same number") ||
+    normalized.includes("use same") ||
+    normalized.includes("this whatsapp number")
+  );
+};
+
+const buildPartialPaymentAmountPrompt = (user) => {
+  const total = getOrderTotalAmount(user);
+  if (!Number.isFinite(total)) {
+    return "Please type the amount you want to pay now.";
+  }
+  return `Your order total is ${formatCurrencyAmount(total, RAZORPAY_CURRENCY)}.\nPlease type how much you want to pay now.\n(Example: 500)`;
+};
+
+const buildPaymentConfirmPrompt = (user) => {
+  const payment = user?.data?.orderPaymentIntent || null;
+  if (payment?.paymentUrl) {
+    const modeLabel = payment.mode === "partial" ? "partial" : "full";
+    const amountLabel = formatCurrencyAmount(payment.payAmount, payment.currency || RAZORPAY_CURRENCY);
+    return `Please complete your ${modeLabel} payment of ${amountLabel} using this secure link 👇\n${payment.paymentUrl}\n\nReply *DONE* after payment.`;
+  }
+  return PAYMENT_LINK
+    ? `Please complete payment using this secure link 👇\n${PAYMENT_LINK}\n\nReply *DONE* after payment.`
+    : "Please complete payment using the link shared by support.\nReply *DONE* after payment.";
+};
+
+const parseAmountFromText = (input) => {
+  const raw = String(input || "").replace(/,/g, "");
+  const matched = raw.match(/(\d+(?:\.\d{1,2})?)/);
+  if (!matched) return null;
+  const amount = Number(matched[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return Number(amount.toFixed(2));
+};
+
+const buildOrderSummaryMessage = (user) => {
+  const product = user?.data?.selectedProduct || {};
+  const quantity = Number(user?.data?.productQuantity || 1);
+  const total = getOrderTotalAmount(user);
   const customerName = sanitizeNameUpper(user?.data?.name || user?.name) || "N/A";
   const address = sanitizeText(user?.data?.address || "", 500) || "N/A";
   const phone = sanitizePhone(user?.data?.deliveryPhone || "") || "N/A";
@@ -488,7 +625,7 @@ const buildOrderSummaryMessage = (user) => {
   const lines = ["🧾 Order Summary", ""];
   lines.push(`Product: ${product?.label || "N/A"}`);
   lines.push(`Quantity: ${quantity}${product?.packLabel ? ` x ${product.packLabel}` : ""}`);
-  lines.push(`Total: ${total == null ? "N/A" : formatInr(total)}`);
+  lines.push(`Total: ${total == null ? "N/A" : formatCurrencyAmount(total, RAZORPAY_CURRENCY)}`);
   lines.push("");
   lines.push(`Name: ${customerName}`);
   lines.push(`Address: ${address}`);
@@ -1304,7 +1441,57 @@ const fetchOpenRouterReply = async ({
 };
 
 const AUTH_DATA_PATH = process.env.WHATSAPP_AUTH_PATH || ".wwebjs_auth";
-const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH;
+const PUPPETEER_CANDIDATE_PATHS = Object.freeze([
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/opt/google/chrome/google-chrome",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+  "/snap/bin/chromium",
+]);
+const PUPPETEER_CANDIDATE_COMMANDS = Object.freeze([
+  "google-chrome",
+  "google-chrome-stable",
+  "chromium-browser",
+  "chromium",
+]);
+
+const resolvePuppeteerExecutablePath = () => {
+  const configured = String(process.env.PUPPETEER_EXECUTABLE_PATH || "").trim();
+  if (configured && existsSync(configured)) {
+    return configured;
+  }
+  if (configured) {
+    logger.warn("Configured PUPPETEER_EXECUTABLE_PATH not found. Falling back to auto-detect.", {
+      configuredPath: configured,
+    });
+  }
+
+  for (const candidate of PUPPETEER_CANDIDATE_PATHS) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const command of PUPPETEER_CANDIDATE_COMMANDS) {
+    try {
+      const resolved = String(
+        execFileSync("which", [command], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+      )
+        .split("\n")[0]
+        .trim();
+      if (resolved && existsSync(resolved)) {
+        return resolved;
+      }
+    } catch (_error) {
+      // Ignore lookup failure and try next candidate.
+    }
+  }
+
+  return "";
+};
+
+const PUPPETEER_EXECUTABLE_PATH = resolvePuppeteerExecutablePath();
 
 const createClient = (adminId) =>
   new Client({
@@ -1547,10 +1734,48 @@ const delay = (ms) => new Promise((res) => setTimeout(res, ms));
    =============================== */
 const TWO_MINUTES_MS = 2 * 60 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
-const APPOINTMENT_START_HOUR = Number(process.env.APPOINTMENT_START_HOUR || 9);
-const APPOINTMENT_END_HOUR = Number(process.env.APPOINTMENT_END_HOUR || 20);
-const APPOINTMENT_SLOT_MINUTES = Number(process.env.APPOINTMENT_SLOT_MINUTES || 60);
-const APPOINTMENT_WINDOW_MONTHS = Number(process.env.APPOINTMENT_WINDOW_MONTHS || 3);
+const DEFAULT_APPOINTMENT_SETTINGS = Object.freeze({
+  startHour: Number(process.env.APPOINTMENT_START_HOUR || 9),
+  endHour: Number(process.env.APPOINTMENT_END_HOUR || 20),
+  slotMinutes: Number(process.env.APPOINTMENT_SLOT_MINUTES || 60),
+  windowMonths: Number(process.env.APPOINTMENT_WINDOW_MONTHS || 3),
+});
+
+const parseIntegerOrNull = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.trunc(num);
+};
+
+const resolveAppointmentSettings = (raw = null) => {
+  const startHourRaw = parseIntegerOrNull(raw?.startHour ?? raw?.appointment_start_hour);
+  const endHourRaw = parseIntegerOrNull(raw?.endHour ?? raw?.appointment_end_hour);
+  const slotMinutesRaw = parseIntegerOrNull(raw?.slotMinutes ?? raw?.appointment_slot_minutes);
+  const windowMonthsRaw = parseIntegerOrNull(raw?.windowMonths ?? raw?.appointment_window_months);
+
+  const startHour =
+    startHourRaw !== null && startHourRaw >= 0 && startHourRaw <= 23
+      ? startHourRaw
+      : DEFAULT_APPOINTMENT_SETTINGS.startHour;
+  let endHour =
+    endHourRaw !== null && endHourRaw >= 1 && endHourRaw <= 24
+      ? endHourRaw
+      : DEFAULT_APPOINTMENT_SETTINGS.endHour;
+  const slotMinutes =
+    slotMinutesRaw !== null && slotMinutesRaw >= 15 && slotMinutesRaw <= 240
+      ? slotMinutesRaw
+      : DEFAULT_APPOINTMENT_SETTINGS.slotMinutes;
+  const windowMonths =
+    windowMonthsRaw !== null && windowMonthsRaw >= 1 && windowMonthsRaw <= 24
+      ? windowMonthsRaw
+      : DEFAULT_APPOINTMENT_SETTINGS.windowMonths;
+
+  if (endHour <= startHour) {
+    endHour = Math.min(24, startHour + 1);
+  }
+
+  return { startHour, endHour, slotMinutes, windowMonths };
+};
 
 const DEFAULT_MAIN_MENU_CHOICES = [
   { id: "PRODUCTS", number: "1", label: "View Products" },
@@ -1729,6 +1954,56 @@ const parseAllowedAutomationBusinessTypes = () => {
 const ALLOWED_AUTOMATION_BUSINESS_TYPES = parseAllowedAutomationBusinessTypes();
 
 const textHasAny = (input, keywords) => keywords.some((word) => input.includes(word));
+
+const hasKeywordToken = (input, keyword) => {
+  const normalizedInput = normalizeComparableText(input);
+  const normalizedKeyword = normalizeComparableText(keyword);
+  if (!normalizedInput || !normalizedKeyword) return false;
+  return ` ${normalizedInput} `.includes(` ${normalizedKeyword} `);
+};
+
+const isOwnerManagerRequest = (input) =>
+  OWNER_MANAGER_KEYWORDS.some((keyword) => hasKeywordToken(input, keyword));
+
+const isImmediateCallbackRequest = (input) =>
+  hasKeywordToken(input, "now") ||
+  IMMEDIATE_CALLBACK_KEYWORDS.some((keyword) => hasKeywordToken(input, keyword));
+
+const isOwnerManagerCallbackRequest = ({ user, appointmentType }) =>
+  user?.data?.ownerManagerCallback === true || isOwnerManagerRequest(appointmentType || "");
+
+const getAdminSelfChatId = (client) => {
+  const ownNumber = sanitizePhone(client?.info?.wid?.user || "");
+  if (!ownNumber) return null;
+  return `${ownNumber}@c.us`;
+};
+
+const notifyOwnerManagerCallbackToAdmin = async ({
+  client,
+  user,
+  phone,
+  requestedAtLabel,
+  immediate = false,
+}) => {
+  const to = getAdminSelfChatId(client);
+  if (!to || !client) return false;
+  const customerName = sanitizeNameUpper(user?.name || user?.data?.name) || "UNKNOWN";
+  const customerPhone = sanitizePhone(phone) || "N/A";
+  const lines = [
+    "🔔 Owner/Manager Callback Request",
+    `Customer Name: ${customerName}`,
+    `Customer Number: ${customerPhone}`,
+    `Requested Time: ${requestedAtLabel}`,
+    immediate ? "Priority: Immediate callback requested." : "Priority: Scheduled callback.",
+  ];
+  try {
+    await client.sendMessage(to, lines.join("\n"));
+    return true;
+  } catch (error) {
+    console.warn("⚠️ Failed to notify admin about owner/manager callback:", error?.message || error);
+    return false;
+  }
+};
 
 const extractNumber = (input) => {
   const match = input.match(/\d+/);
@@ -2039,10 +2314,11 @@ const isPastDateTime = (dateTime) => {
   return isBefore(dateTime, new Date());
 };
 
-const withinAppointmentWindow = (date) => {
+const withinAppointmentWindow = (date, appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS) => {
   if (!date || !isValid(date)) return false;
+  const { windowMonths } = resolveAppointmentSettings(appointmentSettings);
   const now = new Date();
-  const windowEnd = addMonths(startOfDay(now), APPOINTMENT_WINDOW_MONTHS);
+  const windowEnd = addMonths(startOfDay(now), windowMonths);
   return !isBefore(date, now) && !isAfter(date, windowEnd);
 };
 
@@ -2054,9 +2330,10 @@ const buildDateOptions = () => {
 const formatDateOption = (date) => format(date, "EEE, dd MMM");
 const formatTimeOption = (date) => format(date, "h:mm a");
 
-const buildDaySlots = (date) => {
+const buildDaySlots = (date, appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS) => {
+  const { startHour, endHour } = resolveAppointmentSettings(appointmentSettings);
   const slots = [];
-  for (let hour = APPOINTMENT_START_HOUR; hour < APPOINTMENT_END_HOUR; hour += 1) {
+  for (let hour = startHour; hour < endHour; hour += 1) {
     slots.push(setMinutes(setHours(date, hour), 0));
   }
   return slots;
@@ -2072,16 +2349,24 @@ const getBookedSlots = async (adminId, dayStart, dayEnd) => {
   return new Set(rows.map((row) => new Date(row.start_time).getTime()));
 };
 
-const getAvailableSlotsForDate = async (adminId, date) => {
+const getAvailableSlotsForDate = async (
+  adminId,
+  date,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS
+) => {
   const dayStart = startOfDay(date);
   const dayEnd = addDays(dayStart, 1);
   const booked = await getBookedSlots(adminId, dayStart, dayEnd);
-  return buildDaySlots(dayStart).filter((slot) => !booked.has(slot.getTime()));
+  return buildDaySlots(dayStart, appointmentSettings).filter((slot) => !booked.has(slot.getTime()));
 };
 
-const findNearestAvailableSlots = async (adminId, requestedAt) => {
+const findNearestAvailableSlots = async (
+  adminId,
+  requestedAt,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS
+) => {
   const dayStart = startOfDay(requestedAt);
-  const available = await getAvailableSlotsForDate(adminId, dayStart);
+  const available = await getAvailableSlotsForDate(adminId, dayStart, appointmentSettings);
   if (available.length) {
     return available
       .sort((a, b) => Math.abs(a - requestedAt) - Math.abs(b - requestedAt))
@@ -2090,8 +2375,8 @@ const findNearestAvailableSlots = async (adminId, requestedAt) => {
   const slots = [];
   for (let i = 1; i <= 7 && slots.length < 3; i += 1) {
     const date = addDays(dayStart, i);
-    if (!withinAppointmentWindow(date)) break;
-    const daySlots = await getAvailableSlotsForDate(adminId, date);
+    if (!withinAppointmentWindow(date, appointmentSettings)) break;
+    const daySlots = await getAvailableSlotsForDate(adminId, date, appointmentSettings);
     slots.push(...daySlots);
   }
   return slots.slice(0, 3);
@@ -2101,11 +2386,21 @@ const sendAppointmentDateOptions = async ({ sendMessage, user }) => {
   const options = buildDateOptions();
   user.data.appointmentDateOptions = options.map((date) => date.toISOString());
   const lines = options.map((date, idx) => `${idx + 1}️⃣ ${formatDateOption(date)}`);
-  await sendMessage(`Please choose a date:\n${lines.join("\n")}`);
+  const intro =
+    user?.data?.ownerManagerCallback === true
+      ? "Please choose a date for owner/manager callback (or reply *NOW*):"
+      : "Please choose a date:";
+  await sendMessage(`${intro}\n${lines.join("\n")}`);
 };
 
-const sendAppointmentTimeOptions = async ({ sendMessage, user, adminId, date }) => {
-  const available = await getAvailableSlotsForDate(adminId, date);
+const sendAppointmentTimeOptions = async ({
+  sendMessage,
+  user,
+  adminId,
+  date,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS,
+}) => {
+  const available = await getAvailableSlotsForDate(adminId, date, appointmentSettings);
   if (!available.length) {
     await sendMessage(
       "No slots available on that date. Please choose another date."
@@ -2116,7 +2411,11 @@ const sendAppointmentTimeOptions = async ({ sendMessage, user, adminId, date }) 
   }
   user.data.appointmentTimeOptions = available.map((slot) => slot.toISOString());
   const lines = available.map((slot, idx) => `${idx + 1}️⃣ ${formatTimeOption(slot)}`);
-  await sendMessage(`Available times:\n${lines.join("\n")}\nReply with a time or number.`);
+  const immediateLine =
+    user?.data?.ownerManagerCallback === true ? "\nReply *NOW* for urgent callback." : "";
+  await sendMessage(
+    `Available times:\n${lines.join("\n")}\nReply with a time or number.${immediateLine}`
+  );
   return true;
 };
 
@@ -2130,10 +2429,16 @@ const bookAppointment = async ({
   appointmentType,
   client,
   users,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS,
 }) => {
-  if (!withinAppointmentWindow(slot)) {
+  const ownerManagerCallback = isOwnerManagerCallbackRequest({ user, appointmentType });
+  const { startHour, endHour, slotMinutes, windowMonths } = resolveAppointmentSettings(
+    appointmentSettings
+  );
+
+  if (!withinAppointmentWindow(slot, appointmentSettings)) {
     await sendMessage(
-      `We can only book appointments within ${APPOINTMENT_WINDOW_MONTHS} months. Please choose a nearer date.`
+      `We can only book appointments within ${windowMonths} months. Please choose a nearer date.`
     );
     await sendAppointmentDateOptions({ sendMessage, user });
     user.step = "APPOINTMENT_DATE";
@@ -2141,17 +2446,23 @@ const bookAppointment = async ({
   }
 
   const hour = slot.getHours();
-  if (hour < APPOINTMENT_START_HOUR || hour >= APPOINTMENT_END_HOUR) {
+  if (hour < startHour || hour >= endHour) {
     await sendMessage(
-      `Available slots are between ${APPOINTMENT_START_HOUR}:00 and ${APPOINTMENT_END_HOUR}:00.`
+      `Available slots are between ${startHour}:00 and ${endHour}:00.`
     );
-    await sendAppointmentTimeOptions({ sendMessage, user, adminId, date: slot });
+    await sendAppointmentTimeOptions({
+      sendMessage,
+      user,
+      adminId,
+      date: slot,
+      appointmentSettings,
+    });
     user.step = "APPOINTMENT_TIME";
     return;
   }
 
   const startTime = slot.toISOString();
-  const endTime = addMinutes(slot, APPOINTMENT_SLOT_MINUTES).toISOString();
+  const endTime = addMinutes(slot, slotMinutes).toISOString();
 
   try {
     await db.query(
@@ -2167,7 +2478,7 @@ const bookAppointment = async ({
     );
   } catch (err) {
     if (err?.code === "23505") {
-      const alternatives = await findNearestAvailableSlots(adminId, slot);
+      const alternatives = await findNearestAvailableSlots(adminId, slot, appointmentSettings);
       if (alternatives.length) {
         const lines = alternatives.map((s, idx) => `${idx + 1}️⃣ ${formatDateOption(s)} ${formatTimeOption(s)}`);
         await sendMessage(
@@ -2186,12 +2497,31 @@ const bookAppointment = async ({
   }
 
   user.data.reason = "Appointment";
+  if (ownerManagerCallback) {
+    user.data.reason = "Owner/Manager Callback";
+  }
   user.data.appointmentType = appointmentType || "Appointment";
   user.data.appointmentAt = `${formatDateOption(slot)} ${formatTimeOption(slot)}`;
 
-  await sendMessage(
-    `✅ Appointment booked for ${formatDateOption(slot)} at ${formatTimeOption(slot)}.`
-  );
+  if (ownerManagerCallback) {
+    await notifyOwnerManagerCallbackToAdmin({
+      client,
+      user,
+      phone,
+      requestedAtLabel: `${formatDateOption(slot)} ${formatTimeOption(slot)}`,
+      immediate: false,
+    });
+  }
+
+  if (ownerManagerCallback) {
+    await sendMessage(
+      `✅ Your owner/manager callback is scheduled for ${formatDateOption(slot)} at ${formatTimeOption(slot)}.`
+    );
+  } else {
+    await sendMessage(
+      `✅ Appointment booked for ${formatDateOption(slot)} at ${formatTimeOption(slot)}.`
+    );
+  }
 
   await maybeFinalizeLead({
     user,
@@ -2204,13 +2534,114 @@ const bookAppointment = async ({
   });
 };
 
-const startAppointmentFlow = async ({ user, sendMessage, appointmentType }) => {
+const startAppointmentFlow = async ({
+  user,
+  sendMessage,
+  appointmentType,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS,
+}) => {
+  const ownerManagerCallback = isOwnerManagerRequest(appointmentType || "");
   user.data.appointmentType = appointmentType || "Appointment";
   user.data.appointmentDate = null;
   user.data.appointmentDateOptions = [];
   user.data.appointmentTimeOptions = [];
+  user.data.ownerManagerCallback = ownerManagerCallback;
+  user.data.appointmentSettings = resolveAppointmentSettings(appointmentSettings);
   user.step = "APPOINTMENT_DATE";
   await sendAppointmentDateOptions({ sendMessage, user });
+};
+
+const startOwnerManagerCallbackFlow = async ({
+  user,
+  sendMessage,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS,
+  initialMessage = "",
+}) => {
+  user.data.reason = "Owner/Manager Callback";
+  user.data.ownerManagerCallback = true;
+  if (initialMessage) {
+    user.data.executiveMessage = sanitizeText(initialMessage, 1000);
+  }
+  await sendMessage(
+    "Sure. I can arrange a callback with the owner/manager.\nReply *NOW* for urgent callback, or choose a date below."
+  );
+  await startAppointmentFlow({
+    user,
+    sendMessage,
+    appointmentType: "Owner/Manager Call",
+    appointmentSettings,
+  });
+};
+
+const createImmediateOwnerManagerAppointment = async ({
+  adminId,
+  user,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS,
+}) => {
+  if (!Number.isFinite(adminId) || !Number.isFinite(user?.clientId)) return;
+  const { slotMinutes } = resolveAppointmentSettings(appointmentSettings);
+  const startTime = new Date();
+  const endTime = addMinutes(startTime, slotMinutes);
+  await db.query(
+    `INSERT INTO appointments (user_id, admin_id, appointment_type, start_time, end_time, status)
+     VALUES (?, ?, ?, ?, ?, 'booked')`,
+    [
+      user.clientId,
+      adminId,
+      "Owner/Manager Call (Urgent)",
+      startTime.toISOString(),
+      endTime.toISOString(),
+    ]
+  );
+};
+
+const handleImmediateOwnerManagerCallback = async ({
+  adminId,
+  user,
+  from,
+  phone,
+  sendMessage,
+  client,
+  users,
+  appointmentSettings = DEFAULT_APPOINTMENT_SETTINGS,
+}) => {
+  try {
+    await createImmediateOwnerManagerAppointment({ adminId, user, appointmentSettings });
+  } catch (error) {
+    if (error?.code !== "23505") {
+      console.warn(
+        "⚠️ Failed to create urgent owner/manager callback appointment:",
+        error?.message || error
+      );
+    }
+  }
+
+  user.data.reason = "Owner/Manager Callback";
+  user.data.ownerManagerCallback = true;
+  user.data.appointmentType = "Owner/Manager Call";
+  user.data.appointmentAt = "Right now (ASAP)";
+
+  await notifyOwnerManagerCallbackToAdmin({
+    client,
+    user,
+    phone,
+    requestedAtLabel: "Right now (ASAP)",
+    immediate: true,
+  });
+
+  await sendMessage(
+    "Owner is busy at the moment. He will call you as soon as possible. Please stay available."
+  );
+
+  await maybeFinalizeLead({
+    user,
+    from,
+    phone,
+    assignedAdminId: adminId,
+    client,
+    users,
+    sendMessage,
+  });
 };
 
 const logMessage = async ({ userId, adminId, text, type }) => {
@@ -2233,12 +2664,9 @@ const sendAndLog = async ({ client, from, userId, adminId, text }) => {
   return logMessage({ userId, adminId, text, type: "outgoing" });
 };
 
-export const sendAdminMessage = async ({ adminId, userId, text }) => {
+export const sendAdminMessage = async ({ adminId, userId, phone, text }) => {
   if (!Number.isFinite(adminId)) {
     return { error: "adminId required", code: "admin_required", status: 400 };
-  }
-  if (!Number.isFinite(userId)) {
-    return { error: "userId required", code: "user_required", status: 400 };
   }
   const messageText = String(text || "").trim();
   if (!messageText) {
@@ -2250,29 +2678,48 @@ export const sendAdminMessage = async ({ adminId, userId, text }) => {
   }
   touchSession(session);
 
-  const [rows] = await db.query(
-    "SELECT id, phone FROM contacts WHERE id = ? LIMIT 1",
-    [userId]
-  );
-  const user = rows?.[0];
-  if (!user?.phone) {
-    return { error: "Contact phone not found", code: "phone_missing", status: 404 };
+  let resolvedUserId = Number.isFinite(userId) ? Number(userId) : null;
+  let normalized = "";
+
+  if (resolvedUserId) {
+    const [rows] = await db.query(
+      "SELECT id, phone FROM contacts WHERE id = ? LIMIT 1",
+      [resolvedUserId]
+    );
+    const user = rows?.[0];
+    if (user?.phone) {
+      normalized = String(user.phone || "").replace(/[^\d]/g, "");
+    } else {
+      resolvedUserId = null;
+    }
   }
-  const normalized = String(user.phone || "").replace(/[^\d]/g, "");
+
   if (!normalized) {
-    return { error: "Contact phone is invalid", code: "phone_invalid", status: 400 };
+    normalized = String(phone || "").replace(/[^\d]/g, "");
+  }
+
+  if (!normalized) {
+    return {
+      error: "Contact phone not found",
+      code: "phone_missing",
+      status: 404,
+    };
   }
 
   const to = `${normalized}@c.us`;
   let logEntry = null;
   try {
-    logEntry = await sendAndLog({
-      client: session.client,
-      from: to,
-      userId,
-      adminId,
-      text: messageText,
-    });
+    if (resolvedUserId) {
+      logEntry = await sendAndLog({
+        client: session.client,
+        from: to,
+        userId: resolvedUserId,
+        adminId,
+        text: messageText,
+      });
+    } else {
+      await session.client.sendMessage(to, messageText);
+    }
   } catch (err) {
     return {
       error: err?.message || "Failed to send message",
@@ -2287,6 +2734,8 @@ export const sendAdminMessage = async ({ adminId, userId, text }) => {
       id: logEntry?.id || null,
       created_at: logEntry?.created_at || new Date().toISOString(),
       status: "delivered",
+      logged: Boolean(logEntry?.id),
+      phone: normalized,
     },
   };
 };
@@ -2403,7 +2852,7 @@ const sendResumePrompt = async ({ user, sendMessage, automation }) => {
       await sendMessage("Please share your delivery address.");
       return;
     case "PRODUCT_CUSTOMER_PHONE":
-      await sendMessage("Your phone number for delivery updates?");
+      await sendMessage(DELIVERY_PHONE_PROMPT);
       return;
     case "PRODUCT_DELIVERY_NOTE":
       await sendMessage("Any note for delivery? (or type NO)");
@@ -2412,14 +2861,16 @@ const sendResumePrompt = async ({ user, sendMessage, automation }) => {
       await sendMessage(buildOrderSummaryMessage(user));
       return;
     case "PRODUCT_PAYMENT_METHOD":
-      await sendMessage("Payment Method:\n1️⃣ Cash on Delivery\n2️⃣ Pay Now");
+      await sendMessage(buildPaymentMethodPrompt());
+      return;
+    case "PRODUCT_PARTIAL_PAYMENT_AMOUNT":
+      await sendMessage(buildPartialPaymentAmountPrompt(user));
       return;
     case "PRODUCT_PAYMENT_CONFIRM":
-      await sendMessage(
-        PAYMENT_LINK
-          ? `Please complete payment using this secure link 👇\n${PAYMENT_LINK}\n\nReply *DONE* after payment.`
-          : "Please complete payment using the link shared by support.\nReply *DONE* after payment."
-      );
+      await sendMessage(buildPaymentConfirmPrompt(user));
+      return;
+    case "PRODUCT_PAYMENT_PROOF":
+      await sendMessage(PAYMENT_PROOF_PROMPT);
       return;
     case "SERVICE_DETAILS": {
       const serviceOption = automation.serviceOptions.find(
@@ -2438,7 +2889,7 @@ const sendResumePrompt = async ({ user, sendMessage, automation }) => {
       await sendMessage("Please share your delivery address.");
       return;
     case "PRODUCT_ALT_CONTACT":
-      await sendMessage("Your phone number for delivery updates?");
+      await sendMessage(DELIVERY_PHONE_PROMPT);
       return;
     case "EXECUTIVE_MESSAGE":
       await sendMessage(
@@ -2451,8 +2902,15 @@ const sendResumePrompt = async ({ user, sendMessage, automation }) => {
     case "APPOINTMENT_TIME": {
       const rawDate = user.data.appointmentDate;
       const date = rawDate ? new Date(rawDate) : null;
+      const appointmentSettings = resolveAppointmentSettings(user.data?.appointmentSettings);
       if (date && isValid(date)) {
-        await sendAppointmentTimeOptions({ sendMessage, user, adminId: user.assignedAdminId, date });
+        await sendAppointmentTimeOptions({
+          sendMessage,
+          user,
+          adminId: user.assignedAdminId,
+          date,
+          appointmentSettings,
+        });
       } else {
         await sendAppointmentDateOptions({ sendMessage, user });
       }
@@ -2502,8 +2960,16 @@ const inferStepFromOutgoing = (text, automation) => {
   if (normalized.includes("any note for delivery")) return "PRODUCT_DELIVERY_NOTE";
   if (normalized.includes("order summary")) return "PRODUCT_ORDER_SUMMARY";
   if (normalized.includes("payment method")) return "PRODUCT_PAYMENT_METHOD";
+  if (normalized.includes("how much you want to pay")) return "PRODUCT_PARTIAL_PAYMENT_AMOUNT";
   if (normalized.includes("reply *done*") || normalized.includes("reply done after payment")) {
     return "PRODUCT_PAYMENT_CONFIRM";
+  }
+  if (
+    normalized.includes("payment is on hold") ||
+    normalized.includes("upi transaction id") ||
+    normalized.includes("razorpay payment id")
+  ) {
+    return "PRODUCT_PAYMENT_PROOF";
   }
   if (normalized.includes("please share your service details")) return "SERVICE_DETAILS";
   if (normalized.includes("full delivery address")) return "PRODUCT_CUSTOMER_ADDRESS";
@@ -2608,6 +3074,7 @@ const fetchRecentOrdersForPhone = async ({ adminId, phone, limit = 3 }) => {
         fulfillment_status,
         payment_status,
         payment_total,
+        payment_paid,
         delivery_method,
         COALESCE(placed_at, created_at) AS placed_at,
         updated_at
@@ -2631,6 +3098,29 @@ const toSimpleStatusLabel = (value) =>
     .replace(/\s+/g, " ")
     .trim()
     .toUpperCase();
+
+const formatOrderPaymentLine = (order = {}) => {
+  const rawStatus = String(order?.payment_status || "pending").toLowerCase();
+  const total = Number(order?.payment_total);
+  const paid = Number(order?.payment_paid);
+  const safeTotal = Number.isFinite(total) && total > 0 ? total : null;
+  const safePaid = Number.isFinite(paid) && paid > 0 ? Math.max(0, paid) : 0;
+
+  if (rawStatus === "failed") return "FAILED";
+  if (rawStatus === "refunded") {
+    return safeTotal ? `REFUNDED (${formatInr(safeTotal)})` : "REFUNDED";
+  }
+  if (safeTotal && safePaid > 0 && safePaid + 0.01 < safeTotal) {
+    return `PARTIAL (${formatInr(safePaid)} / ${formatInr(safeTotal)})`;
+  }
+  if (safeTotal && safePaid + 0.01 >= safeTotal) {
+    return `PAID (${formatInr(safeTotal)})`;
+  }
+  if (!safeTotal && safePaid > 0) {
+    return `PAID (${formatInr(safePaid)})`;
+  }
+  return toSimpleStatusLabel(rawStatus || "pending");
+};
 
 const isPackedOrder = (order) => {
   const status = String(order?.status || "").toLowerCase();
@@ -2674,7 +3164,7 @@ const buildTrackingMessage = (orders) => {
     lines.push(`Packed: ${packedLabel}`);
     lines.push(`Delivery Released: ${releasedLabel}`);
     lines.push(`Delivery: ${deliveredLabel}`);
-    lines.push(`Payment: ${toSimpleStatusLabel(order.payment_status || "pending")}`);
+    lines.push(`Payment: ${formatOrderPaymentLine(order)}`);
     lines.push(`Placed: ${placedAt}`);
     lines.push(`Last Update: ${updatedAt}`);
     if (Number.isFinite(Number(order.payment_total))) {
@@ -2689,12 +3179,239 @@ const buildTrackingMessage = (orders) => {
   return lines.join("\n");
 };
 
+const buildRazorpayReferenceId = ({ adminId, phone }) => {
+  const adminPart = Number.isFinite(Number(adminId)) ? String(Number(adminId)) : "0";
+  const phonePart = String(phone || "").replace(/\D/g, "").slice(-6) || "na";
+  return `wa_${adminPart}_${phonePart}_${Date.now()}`.slice(0, 40);
+};
+
+const normalizePaymentMode = (mode) => (mode === "partial" ? "partial" : "full");
+
+const PAYMENT_PROOF_PROMPT =
+  "Please share your UPI transaction ID / Razorpay payment ID and a screenshot. We will verify and confirm.";
+
+const extractPaymentProofId = (input) => {
+  const text = String(input || "").trim();
+  if (!text) return "";
+  const tagged = text.match(
+    /(upi transaction id|transaction id|txn id|payment id|utr|rrn)\s*[:#-]?\s*([a-zA-Z0-9._-]{6,60})/i
+  );
+  if (tagged?.[2]) return tagged[2].trim();
+  const generic = text.match(/\b[a-zA-Z0-9._-]{10,60}\b/g) || [];
+  if (!generic.length) return "";
+  generic.sort((a, b) => b.length - a.length);
+  return String(generic[0] || "").trim();
+};
+
+const buildOnlinePaymentNotes = (intent, verification = null) => {
+  const modeLabel = intent?.mode === "partial" ? "Partial" : "Full";
+  const amountLabel = formatCurrencyAmount(intent?.payAmount, intent?.currency || RAZORPAY_CURRENCY);
+  const totalLabel = formatCurrencyAmount(intent?.totalAmount, intent?.currency || RAZORPAY_CURRENCY);
+  const source = intent?.paymentLinkId
+    ? `Razorpay Link ${intent.paymentLinkId}`
+    : "WhatsApp Payment Link";
+  const parts = [
+    `${modeLabel} payment selected via WhatsApp (${source}).`,
+    `Requested: ${amountLabel}.`,
+    `Order total: ${totalLabel}.`,
+  ];
+  const verifiedAmount = Number(verification?.paidAmount);
+  if (Number.isFinite(verifiedAmount) && verifiedAmount > 0) {
+    parts.push(
+      `Verified amount: ${formatCurrencyAmount(
+        verifiedAmount,
+        verification?.currency || intent?.currency || RAZORPAY_CURRENCY
+      )}.`
+    );
+  }
+  if (verification?.paymentId) {
+    parts.push(`Payment ID: ${verification.paymentId}.`);
+  }
+  if (verification?.transactionId) {
+    parts.push(`Transaction ID: ${verification.transactionId}.`);
+  }
+  if (verification?.paidAt) {
+    parts.push(`Paid at: ${verification.paidAt}.`);
+  }
+  return parts.join(" ");
+};
+
+const buildPaymentHoldNotes = ({
+  intent,
+  verification = null,
+  proofId = "",
+  hasScreenshot = false,
+}) => {
+  const parts = [
+    "Payment verification on hold.",
+    intent?.paymentLinkId ? `Payment link: ${intent.paymentLinkId}.` : "",
+    Number.isFinite(Number(intent?.payAmount))
+      ? `Claimed amount: ${formatCurrencyAmount(
+          Number(intent.payAmount),
+          intent?.currency || RAZORPAY_CURRENCY
+        )}.`
+      : "",
+    proofId ? `Proof ID: ${proofId}.` : "Proof ID: not provided.",
+    hasScreenshot ? "Screenshot shared by customer." : "Screenshot not shared yet.",
+    verification?.reason ? `Verification reason: ${verification.reason}.` : "",
+    verification?.paymentId ? `Matched payment ID: ${verification.paymentId}.` : "",
+    verification?.transactionId ? `Matched transaction ID: ${verification.transactionId}.` : "",
+  ].filter(Boolean);
+  return parts.join(" ");
+};
+
+const buildPaymentSummaryForCustomer = ({ verification, intent }) => {
+  const paidAmount = Number(verification?.paidAmount);
+  const currency = verification?.currency || intent?.currency || RAZORPAY_CURRENCY;
+  const amountLabel = Number.isFinite(paidAmount) ? formatCurrencyAmount(paidAmount, currency) : "N/A";
+  const ref = verification?.transactionId || verification?.paymentId || "available in receipt";
+  return `✅ Payment verified: ${amountLabel}\nReference: ${ref}`;
+};
+
+const verifyIntentPayment = async ({ intent, proofId = "" }) => {
+  const paymentLinkId = String(intent?.paymentLinkId || "").trim();
+  if (!paymentLinkId) {
+    return {
+      verified: false,
+      reason: "payment_link_missing",
+      mode: "none",
+      paidAmount: 0,
+      paymentId: "",
+      transactionId: "",
+      paidAt: null,
+      currency: intent?.currency || RAZORPAY_CURRENCY,
+      proofMatched: null,
+    };
+  }
+  return verifyRazorpayPaymentLink({
+    paymentLinkId,
+    expectedAmount: intent?.payAmount,
+    proofId,
+  });
+};
+
+const createOnlinePaymentIntent = async ({
+  user,
+  adminId,
+  fallbackPhone,
+  payAmount,
+  mode = "full",
+}) => {
+  const totalAmount = getOrderTotalAmount(user);
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    throw new Error("Unable to calculate order total.");
+  }
+
+  const normalizedAmount = normalizeRazorpayAmount(payAmount);
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+    throw new Error("Invalid payment amount.");
+  }
+
+  const boundedAmount = Number(Math.min(normalizedAmount, totalAmount).toFixed(2));
+  const normalizedMode =
+    normalizePaymentMode(mode) === "partial" && boundedAmount < totalAmount ? "partial" : "full";
+  const customerPhone =
+    sanitizePhone(user?.data?.deliveryPhone || "") || sanitizePhone(fallbackPhone) || "";
+  const customerName = sanitizeNameUpper(user?.data?.name || user?.name || "Customer") || "Customer";
+  const customerEmail = sanitizeEmail(user?.data?.email || user?.email || "");
+  const referenceId = buildRazorpayReferenceId({ adminId, phone: customerPhone || fallbackPhone });
+
+  let paymentUrl = PAYMENT_LINK || "";
+  let paymentLinkId = "";
+
+  if (isRazorpayConfigured()) {
+    try {
+      const paymentLink = await createRazorpayPaymentLink({
+        amount: boundedAmount,
+        currency: RAZORPAY_CURRENCY,
+        description: RAZORPAY_DESCRIPTION,
+        referenceId,
+        customer: {
+          name: customerName,
+          contact: customerPhone || undefined,
+          email: customerEmail || undefined,
+        },
+        callbackUrl: RAZORPAY_CALLBACK_URL,
+        callbackMethod: RAZORPAY_CALLBACK_METHOD,
+        notes: {
+          source: "whatsapp",
+          payment_mode: normalizedMode,
+          order_total: String(totalAmount),
+          admin_id: String(Number(adminId) || ""),
+        },
+      });
+      paymentUrl = paymentLink.shortUrl || PAYMENT_LINK || "";
+      paymentLinkId = paymentLink.id || "";
+    } catch (error) {
+      logger.error("Razorpay payment link creation failed", {
+        adminId: Number(adminId) || null,
+        error: error?.message || String(error),
+      });
+      if (!PAYMENT_LINK) {
+        throw error;
+      }
+    }
+  } else if (!PAYMENT_LINK) {
+    throw new Error("Online payment is not configured yet.");
+  }
+
+  if (!paymentUrl) {
+    throw new Error("Payment link is unavailable right now.");
+  }
+
+  return {
+    mode: normalizedMode,
+    payAmount: boundedAmount,
+    totalAmount,
+    currency: RAZORPAY_CURRENCY,
+    paymentUrl,
+    paymentLinkId,
+    referenceId,
+  };
+};
+
+const sendPaymentQrCodeMessage = async ({
+  client,
+  to,
+  userId,
+  adminId,
+  paymentUrl,
+  payAmount,
+  currency,
+}) => {
+  if (!client || !to || !paymentUrl || !MessageMedia?.fromDataUrl) {
+    return false;
+  }
+  try {
+    const dataUrl = await qrImage.toDataURL(paymentUrl, { width: 400, margin: 1 });
+    const media = MessageMedia.fromDataUrl(dataUrl, `payment-${Date.now()}.png`);
+    const caption = `Scan this QR to pay ${formatCurrencyAmount(payAmount, currency)}.`;
+    await client.sendMessage(to, media, { caption });
+    await logMessage({
+      userId,
+      adminId,
+      text: `${caption}\n${paymentUrl}`,
+      type: "outgoing",
+    });
+    return true;
+  } catch (error) {
+    logger.warn("Failed to send payment QR image", {
+      adminId: Number(adminId) || null,
+      error: error?.message || String(error),
+    });
+    return false;
+  }
+};
+
 const createWhatsAppOrder = async ({
   user,
   adminId,
   fallbackPhone,
   paymentMethod = "cod",
   paymentStatus = "pending",
+  paymentPaid = null,
+  paymentCurrency = "INR",
+  paymentNotes = null,
 }) => {
   const normalizedAdminId = Number(adminId);
   if (!Number.isFinite(normalizedAdminId) || normalizedAdminId <= 0) {
@@ -2716,7 +3433,19 @@ const createWhatsAppOrder = async ({
   const unitPrice = Number(product.priceAmount);
   const paymentTotal =
     Number.isFinite(unitPrice) && unitPrice >= 0 ? Number((unitPrice * quantity).toFixed(2)) : null;
-  const paid = paymentStatus === "paid" && Number.isFinite(paymentTotal) ? paymentTotal : 0;
+  const requestedPaid = Number(paymentPaid);
+  let paid =
+    Number.isFinite(requestedPaid) && requestedPaid >= 0
+      ? Number(requestedPaid.toFixed(2))
+      : paymentStatus === "paid" && Number.isFinite(paymentTotal)
+      ? paymentTotal
+      : 0;
+  if (Number.isFinite(paymentTotal) && paid > paymentTotal) {
+    paid = paymentTotal;
+  }
+  if (!Number.isFinite(paymentTotal) || paymentTotal < 0) {
+    paid = 0;
+  }
   const nowStamp = Date.now().toString().slice(-8);
   const rand = String(Math.floor(100 + Math.random() * 900));
   const orderNumber = `WA-${nowStamp}${rand}`;
@@ -2745,6 +3474,15 @@ const createWhatsAppOrder = async ({
       created_at: new Date().toISOString(),
     });
   }
+
+  const normalizedCurrency = normalizeRazorpayCurrency(paymentCurrency || "INR");
+  const paymentNotesText =
+    sanitizeText(
+      paymentNotes ||
+        (paymentMethod === "online" ? "Paid via WhatsApp flow" : "Cash on delivery"),
+      500
+    ) ||
+    (paymentMethod === "online" ? "Paid via WhatsApp flow" : "Cash on delivery");
 
   if (user?.clientId) {
     await db.query(
@@ -2800,11 +3538,84 @@ const createWhatsAppOrder = async ({
       paid,
       paymentStatus,
       paymentMethod || null,
-      "INR",
-      paymentMethod === "online" ? "Paid via WhatsApp flow" : "Cash on delivery",
+      normalizedCurrency,
+      paymentNotesText,
     ]
   );
-  return rows?.[0] || null;
+  const createdOrder = rows?.[0] || null;
+  if (createdOrder?.id) {
+    try {
+      await syncOrderRevenueByOrderId(createdOrder.id, normalizedAdminId);
+    } catch (error) {
+      logger.error("Failed to sync order revenue record", {
+        adminId: normalizedAdminId,
+        orderId: createdOrder.id,
+        error: error?.message || String(error),
+      });
+    }
+  }
+  return createdOrder;
+};
+
+const sendConfirmedOrderMessages = async ({ sendMessage, createdOrder, user }) => {
+  const orderRef = createdOrder?.order_number || `#${createdOrder?.id || "N/A"}`;
+  const qty = Number(user?.data?.productQuantity || 1);
+  const productName = user?.data?.selectedProduct?.label || user?.data?.productType || "Product";
+  const packLabel = user?.data?.selectedProduct?.packLabel
+    ? ` x ${user.data.selectedProduct.packLabel}`
+    : "";
+
+  await delay(400);
+  await sendMessage(
+    `🎉 Your order is confirmed!\n\nOrder ID: ${orderRef}\nProduct: ${productName}\nQuantity: ${qty}${packLabel}\nExpected Delivery: 3–5 days\n\nWe'll send updates here on WhatsApp.\nNeed help? Type SUPPORT.`
+  );
+  await delay(400);
+  await sendMessage(
+    `📦 Shipping Update\nYour order ${orderRef} has been placed and is being prepared.\nType *TRACK ORDER* anytime for latest updates.`
+  );
+  await delay(400);
+  await sendMessage(
+    "⭐ Review Request\nHope you loved your order ❤️\nAfter delivery, please rate your experience ⭐⭐⭐⭐⭐"
+  );
+};
+
+const notifyPaymentProofToAdmin = async ({
+  client,
+  user,
+  phone,
+  proofId = "",
+  intent = null,
+  verification = null,
+  hasScreenshot = false,
+}) => {
+  const to = getAdminSelfChatId(client);
+  if (!to || !client) return false;
+  const customerName = sanitizeNameUpper(user?.name || user?.data?.name) || "UNKNOWN";
+  const customerPhone = sanitizePhone(phone) || "N/A";
+  const lines = [
+    "💳 Payment Verification Hold",
+    `Customer Name: ${customerName}`,
+    `Customer Number: ${customerPhone}`,
+    `Claimed Amount: ${
+      Number.isFinite(Number(intent?.payAmount))
+        ? formatCurrencyAmount(Number(intent.payAmount), intent?.currency || RAZORPAY_CURRENCY)
+        : "N/A"
+    }`,
+    `Payment Link ID: ${intent?.paymentLinkId || "N/A"}`,
+    `Proof ID: ${proofId || "Not provided"}`,
+    `Screenshot Shared: ${hasScreenshot ? "Yes" : "No"}`,
+    `Auto Verification: ${verification?.verified ? "Verified" : "Not verified"}`,
+    verification?.reason ? `Reason: ${verification.reason}` : "",
+  ].filter(Boolean);
+  try {
+    await client.sendMessage(to, lines.join("\n"));
+    return true;
+  } catch (error) {
+    logger.warn("Failed to notify admin for payment verification hold", {
+      error: error?.message || String(error),
+    });
+    return false;
+  }
 };
 
 const resetProductFlowData = (user) => {
@@ -2816,6 +3627,8 @@ const resetProductFlowData = (user) => {
   delete user.data.address;
   delete user.data.productDetails;
   delete user.data.productDetailsPrompt;
+  delete user.data.orderPaymentIntent;
+  delete user.data.pendingPaymentVerification;
 };
 
 const handleIncomingMessage = async ({
@@ -2827,6 +3640,9 @@ const handleIncomingMessage = async ({
   skipDuplicateCheck = false,
   lastOutgoingText = null,
 }) => {
+  let sender = null;
+  let phone = null;
+  let activeAdminId = null;
   try {
     if (!session.state.isReady) return;
     if (message && message.fromMe) return;
@@ -2834,20 +3650,20 @@ const handleIncomingMessage = async ({
     touchSession(session);
 
     const { client, users } = session;
-    const sender = from || message?.from;
+    sender = from || message?.from || null;
     if (!sender || sender.endsWith("@g.us")) return;
 
     const messageText = sanitizeText(text ?? message?.body ?? "", 4000);
     if (!messageText) return;
 
     const lower = messageText.toLowerCase();
-    const phone = sanitizePhone(sender.replace("@c.us", ""));
+    phone = sanitizePhone(sender.replace("@c.us", ""));
     if (!phone) return;
 
     /* ===============================
        🔍 CHECK USER IN DB
        =============================== */
-    const activeAdminId = session.adminId;
+    activeAdminId = session.adminId;
     if (!activeAdminId) {
       console.warn("⚠️ Incoming message ignored because no admin is connected.");
       return;
@@ -2927,6 +3743,9 @@ const handleIncomingMessage = async ({
     }
 
     const user = session.users[sender];
+    if (!sanitizePhone(user?.data?.defaultPhone || "")) {
+      user.data.defaultPhone = phone;
+    }
     user.automationDisabled = existingUser?.automation_disabled === true;
     const sendMessage = async (messageTextToSend) =>
       sendAndLog({
@@ -2951,6 +3770,8 @@ const handleIncomingMessage = async ({
     }
 
     const aiSettings = await getAdminAISettings(assignedAdminId);
+    const appointmentSettings = resolveAppointmentSettings(aiSettings);
+    user.data.appointmentSettings = appointmentSettings;
     const businessType = normalizeBusinessType(adminProfile?.business_type);
     const brandName = sanitizeText(adminProfile?.business_category || "Our Store", 120) || "Our Store";
     const baseAutomation = getAutomationProfile(businessType, brandName);
@@ -2988,6 +3809,7 @@ const handleIncomingMessage = async ({
     const hasActiveGuidedFlow = Boolean(
       user?.step && !["START", "MENU", "RESUME_DECISION"].includes(user.step)
     );
+    const wantsOwnerManager = isOwnerManagerRequest(normalizedMessage);
 
     if (aiDetectedIntent === "SERVICES") {
       user.data.reason = "Services";
@@ -2995,6 +3817,17 @@ const handleIncomingMessage = async ({
       user.data.reason = "Products";
     } else if (aiDetectedIntent === "TRACK_ORDER") {
       user.data.reason = "Track Order";
+    }
+
+    if (!hasActiveGuidedFlow && wantsOwnerManager) {
+      await startOwnerManagerCallbackFlow({
+        user,
+        sendMessage,
+        appointmentSettings,
+        initialMessage: messageText,
+      });
+      trackLeadCaptureActivity({ user, messageText, phone, assignedAdminId });
+      return;
     }
 
     if (isMenuCommand(normalizedMessage, messageText)) {
@@ -3226,6 +4059,7 @@ const handleIncomingMessage = async ({
         user,
         sendMessage,
         appointmentType: "Appointment",
+        appointmentSettings,
       });
       return;
     }
@@ -3276,6 +4110,19 @@ const handleIncomingMessage = async ({
        APPOINTMENT DATE
        =============================== */
     if (user.step === "APPOINTMENT_DATE") {
+      if (user.data?.ownerManagerCallback === true && isImmediateCallbackRequest(messageText)) {
+        await handleImmediateOwnerManagerCallback({
+          adminId: assignedAdminId,
+          user,
+          from: sender,
+          phone,
+          sendMessage,
+          client,
+          users,
+          appointmentSettings,
+        });
+        return;
+      }
       const optionIndex = extractNumber(lower);
       const optionDates = Array.isArray(user.data.appointmentDateOptions)
         ? user.data.appointmentDateOptions
@@ -3305,6 +4152,7 @@ const handleIncomingMessage = async ({
           appointmentType: user.data.appointmentType,
           client,
           users,
+          appointmentSettings,
         });
         return;
       }
@@ -3320,9 +4168,9 @@ const handleIncomingMessage = async ({
         await sendAppointmentDateOptions({ sendMessage, user });
         return;
       }
-      if (!withinAppointmentWindow(parsedDate)) {
+      if (!withinAppointmentWindow(parsedDate, appointmentSettings)) {
         await sendMessage(
-          `We can only book appointments within ${APPOINTMENT_WINDOW_MONTHS} months. Please choose a nearer date.`
+          `We can only book appointments within ${appointmentSettings.windowMonths} months. Please choose a nearer date.`
         );
         await sendAppointmentDateOptions({ sendMessage, user });
         return;
@@ -3335,6 +4183,7 @@ const handleIncomingMessage = async ({
         user,
         adminId: assignedAdminId,
         date: parsedDate,
+        appointmentSettings,
       });
       return;
     }
@@ -3343,6 +4192,19 @@ const handleIncomingMessage = async ({
        APPOINTMENT TIME
        =============================== */
     if (user.step === "APPOINTMENT_TIME") {
+      if (user.data?.ownerManagerCallback === true && isImmediateCallbackRequest(messageText)) {
+        await handleImmediateOwnerManagerCallback({
+          adminId: assignedAdminId,
+          user,
+          from: sender,
+          phone,
+          sendMessage,
+          client,
+          users,
+          appointmentSettings,
+        });
+        return;
+      }
       const optionIndex = extractNumber(lower);
       const optionTimes = Array.isArray(user.data.appointmentTimeOptions)
         ? user.data.appointmentTimeOptions
@@ -3369,6 +4231,7 @@ const handleIncomingMessage = async ({
                 user,
                 adminId: assignedAdminId,
                 date: startOfDay(directDateTime),
+                appointmentSettings,
               });
             }
             return;
@@ -3400,6 +4263,7 @@ const handleIncomingMessage = async ({
           user,
           adminId: assignedAdminId,
           date: baseDate,
+          appointmentSettings,
         });
         return;
       }
@@ -3423,6 +4287,7 @@ const handleIncomingMessage = async ({
           user,
           adminId: assignedAdminId,
           date: baseDate,
+          appointmentSettings,
         });
         return;
       }
@@ -3437,6 +4302,7 @@ const handleIncomingMessage = async ({
         appointmentType: user.data.appointmentType,
         client,
         users,
+        appointmentSettings,
       });
       return;
     }
@@ -3481,6 +4347,7 @@ const handleIncomingMessage = async ({
             user,
             sendMessage,
             appointmentType: matchedService.label,
+            appointmentSettings,
           });
           return;
         }
@@ -3603,6 +4470,7 @@ const handleIncomingMessage = async ({
           user,
           sendMessage,
           appointmentType: matchedService.label,
+          appointmentSettings,
         });
         return;
       }
@@ -3730,6 +4598,7 @@ const handleIncomingMessage = async ({
           user,
           sendMessage,
           appointmentType: selectedService.label,
+          appointmentSettings,
         });
         return;
       }
@@ -3866,8 +4735,14 @@ const handleIncomingMessage = async ({
         return;
       }
 
+      const fallbackDeliveryPhone =
+        sanitizePhone(user?.data?.defaultPhone || "") || sanitizePhone(phone) || null;
+      if (fallbackDeliveryPhone && !sanitizePhone(user?.data?.deliveryPhone || "")) {
+        user.data.deliveryPhone = fallbackDeliveryPhone;
+      }
+
       await delay(500);
-      await sendMessage("Your phone number for delivery updates?");
+      await sendMessage(DELIVERY_PHONE_PROMPT);
       user.step = "PRODUCT_CUSTOMER_PHONE";
       return;
     }
@@ -3877,11 +4752,24 @@ const handleIncomingMessage = async ({
        =============================== */
     if (user.step === "PRODUCT_CUSTOMER_PHONE" || user.step === "PRODUCT_ALT_CONTACT") {
       const deliveryPhone = sanitizePhone(messageText);
-      if (!deliveryPhone) {
-        await sendMessage("Please share a valid phone number for delivery updates.");
+      const fallbackDeliveryPhone =
+        sanitizePhone(user?.data?.defaultPhone || "") || sanitizePhone(phone) || null;
+
+      if (deliveryPhone) {
+        user.data.deliveryPhone = deliveryPhone;
+      } else if (shouldUseSameDeliveryPhone(messageText)) {
+        if (!fallbackDeliveryPhone) {
+          await sendMessage("Please share a valid phone number for delivery updates.");
+          return;
+        }
+        user.data.deliveryPhone = fallbackDeliveryPhone;
+      } else {
+        await sendMessage(
+          "Please share a valid phone number, or type *SAME* to use this WhatsApp number."
+        );
         return;
       }
-      user.data.deliveryPhone = deliveryPhone;
+
       await delay(500);
       await sendMessage("Any note for delivery? (or type NO)");
       user.step = "PRODUCT_DELIVERY_NOTE";
@@ -3921,7 +4809,7 @@ const handleIncomingMessage = async ({
       }
 
       await delay(500);
-      await sendMessage("Payment Method:\n1️⃣ Cash on Delivery\n2️⃣ Pay Now");
+      await sendMessage(buildPaymentMethodPrompt());
       user.step = "PRODUCT_PAYMENT_METHOD";
       return;
     }
@@ -3934,24 +4822,83 @@ const handleIncomingMessage = async ({
       const wantsCod =
         paymentNumber === "1" ||
         textHasAny(lower, ["cod", "cash on delivery", "cash delivery", "cash"]);
-      const wantsPayNow =
+      const wantsPayFull =
         paymentNumber === "2" ||
-        textHasAny(lower, ["pay now", "online", "upi", "gpay", "phonepe", "card"]);
+        textHasAny(lower, ["pay full", "full payment", "pay now", "online", "upi", "gpay", "phonepe", "card"]);
+      const wantsPayPartial =
+        paymentNumber === "3" ||
+        textHasAny(lower, ["partial", "advance", "part payment"]);
 
-      if (!wantsCod && !wantsPayNow) {
-        await sendMessage("Please choose payment method:\n1️⃣ Cash on Delivery\n2️⃣ Pay Now");
+      if (!wantsCod && !wantsPayFull && !wantsPayPartial) {
+        await sendMessage(buildPaymentMethodPrompt());
         return;
       }
 
-      if (wantsPayNow) {
-        await delay(500);
-        if (PAYMENT_LINK) {
+      if (wantsPayPartial) {
+        const totalAmount = getOrderTotalAmount(user);
+        if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
           await sendMessage(
-            `Please complete payment using this secure link 👇\n${PAYMENT_LINK}\n\nReply *DONE* after payment.`
+            "I couldn't calculate the final amount right now. Please choose payment method again."
           );
-        } else {
-          await sendMessage("Please complete payment and reply *DONE* after payment.");
+          await delay(300);
+          await sendMessage(buildPaymentMethodPrompt());
+          return;
         }
+        user.data.orderPaymentIntent = {
+          mode: "partial",
+          totalAmount,
+          currency: RAZORPAY_CURRENCY,
+        };
+        await delay(500);
+        await sendMessage(buildPartialPaymentAmountPrompt(user));
+        user.step = "PRODUCT_PARTIAL_PAYMENT_AMOUNT";
+        return;
+      }
+
+      if (wantsPayFull) {
+        const totalAmount = getOrderTotalAmount(user);
+        if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+          await sendMessage(
+            "I couldn't calculate the final amount right now. Please choose payment method again."
+          );
+          await delay(300);
+          await sendMessage(buildPaymentMethodPrompt());
+          return;
+        }
+
+        let paymentIntent = null;
+        try {
+          paymentIntent = await createOnlinePaymentIntent({
+            user,
+            adminId: assignedAdminId,
+            fallbackPhone: phone,
+            payAmount: totalAmount,
+            mode: "full",
+          });
+        } catch (error) {
+          logger.error("Unable to prepare online payment link", {
+            adminId: assignedAdminId,
+            flowStep: user.step,
+            error: error?.message || String(error),
+          });
+          await sendMessage(
+            "Online payment is unavailable right now. Please choose *1* for Cash on Delivery."
+          );
+          return;
+        }
+
+        user.data.orderPaymentIntent = paymentIntent;
+        await delay(500);
+        await sendMessage(buildPaymentConfirmPrompt(user));
+        await sendPaymentQrCodeMessage({
+          client: session.client,
+          to: sender,
+          userId: user.clientId,
+          adminId: assignedAdminId,
+          paymentUrl: paymentIntent.paymentUrl,
+          payAmount: paymentIntent.payAmount,
+          currency: paymentIntent.currency,
+        });
         user.step = "PRODUCT_PAYMENT_CONFIRM";
         return;
       }
@@ -3962,6 +4909,8 @@ const handleIncomingMessage = async ({
         fallbackPhone: phone,
         paymentMethod: "cod",
         paymentStatus: "pending",
+        paymentCurrency: RAZORPAY_CURRENCY,
+        paymentNotes: "Cash on delivery selected on WhatsApp.",
       });
       if (!createdOrder?.id) {
         logger.error("WhatsApp order insert returned no row", {
@@ -3998,7 +4947,74 @@ const handleIncomingMessage = async ({
     }
 
     /* ===============================
-       STEP 12: PAYMENT VERIFICATION
+       STEP 12: PARTIAL PAYMENT AMOUNT
+       =============================== */
+    if (user.step === "PRODUCT_PARTIAL_PAYMENT_AMOUNT") {
+      const totalAmount = getOrderTotalAmount(user);
+      if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+        await sendMessage("I couldn't calculate your final amount. Please choose payment method again.");
+        await delay(300);
+        await sendMessage(buildPaymentMethodPrompt());
+        user.step = "PRODUCT_PAYMENT_METHOD";
+        return;
+      }
+
+      const enteredAmount = parseAmountFromText(messageText);
+      if (!Number.isFinite(enteredAmount) || enteredAmount <= 0) {
+        await sendMessage("Please enter a valid amount to pay now.\nExample: 500");
+        return;
+      }
+      if (enteredAmount > totalAmount) {
+        await sendMessage(
+          `This is more than your total ${formatCurrencyAmount(totalAmount, RAZORPAY_CURRENCY)}.\nPlease enter a smaller amount.`
+        );
+        return;
+      }
+
+      let paymentIntent = null;
+      try {
+        paymentIntent = await createOnlinePaymentIntent({
+          user,
+          adminId: assignedAdminId,
+          fallbackPhone: phone,
+          payAmount: enteredAmount,
+          mode: "partial",
+        });
+      } catch (error) {
+        logger.error("Unable to prepare partial online payment link", {
+          adminId: assignedAdminId,
+          flowStep: user.step,
+          error: error?.message || String(error),
+        });
+        await sendMessage(
+          "Online payment is unavailable right now. Please choose *1* for Cash on Delivery."
+        );
+        user.step = "PRODUCT_PAYMENT_METHOD";
+        return;
+      }
+
+      user.data.orderPaymentIntent = paymentIntent;
+      if (paymentIntent.mode === "full") {
+        await delay(300);
+        await sendMessage("The entered amount matches full payment, so sharing full payment link.");
+      }
+      await delay(300);
+      await sendMessage(buildPaymentConfirmPrompt(user));
+      await sendPaymentQrCodeMessage({
+        client: session.client,
+        to: sender,
+        userId: user.clientId,
+        adminId: assignedAdminId,
+        paymentUrl: paymentIntent.paymentUrl,
+        payAmount: paymentIntent.payAmount,
+        currency: paymentIntent.currency,
+      });
+      user.step = "PRODUCT_PAYMENT_CONFIRM";
+      return;
+    }
+
+    /* ===============================
+       STEP 13: PAYMENT VERIFICATION
        =============================== */
     if (user.step === "PRODUCT_PAYMENT_CONFIRM") {
       const paymentDone = lower.includes("done") || lower.includes("paid") || lower.includes("completed");
@@ -4010,12 +5026,62 @@ const handleIncomingMessage = async ({
       await delay(500);
       await sendMessage("Thanks 🙌\nWe are verifying your payment.");
 
+      const paymentIntent = user.data.orderPaymentIntent || null;
+      if (!paymentIntent) {
+        await sendMessage("I couldn't find your payment session. Please choose payment method again.");
+        await delay(300);
+        await sendMessage(buildPaymentMethodPrompt());
+        user.step = "PRODUCT_PAYMENT_METHOD";
+        return;
+      }
+
+      let verification = null;
+      try {
+        verification = await verifyIntentPayment({ intent: paymentIntent });
+      } catch (error) {
+        logger.error("Razorpay payment verification failed", {
+          adminId: assignedAdminId,
+          flowStep: user.step,
+          error: error?.message || String(error),
+        });
+      }
+
+      if (!verification?.verified) {
+        user.data.pendingPaymentVerification = {
+          reason: verification?.reason || "not_verified",
+          linkStatus: verification?.linkStatus || "unknown",
+          paymentLinkId: paymentIntent?.paymentLinkId || "",
+          payAmount: paymentIntent?.payAmount || null,
+          totalAmount: paymentIntent?.totalAmount || null,
+          currency: paymentIntent?.currency || RAZORPAY_CURRENCY,
+        };
+        await delay(300);
+        await sendMessage(
+          "Sorry to say, your payment could not be auto-verified right now. Your payment is on hold."
+        );
+        await delay(300);
+        await sendMessage(PAYMENT_PROOF_PROMPT);
+        user.step = "PRODUCT_PAYMENT_PROOF";
+        return;
+      }
+
+      const paidAmount = Number(verification?.paidAmount);
+      const totalAmount = Number(paymentIntent?.totalAmount);
+      const isPartial =
+        Number.isFinite(totalAmount) &&
+        totalAmount > 0 &&
+        Number.isFinite(paidAmount) &&
+        paidAmount + 0.01 < totalAmount;
+
       const createdOrder = await createWhatsAppOrder({
         user,
         adminId: assignedAdminId,
         fallbackPhone: phone,
         paymentMethod: "online",
-        paymentStatus: "paid",
+        paymentStatus: isPartial ? "pending" : "paid",
+        paymentPaid: Number.isFinite(paidAmount) ? paidAmount : null,
+        paymentCurrency: verification?.currency || paymentIntent?.currency || RAZORPAY_CURRENCY,
+        paymentNotes: buildOnlinePaymentNotes(paymentIntent, verification),
       });
       if (!createdOrder?.id) {
         logger.error("WhatsApp order insert returned no row", {
@@ -4028,34 +5094,175 @@ const handleIncomingMessage = async ({
         );
         return;
       }
-      const orderRef = createdOrder?.order_number || `#${createdOrder?.id || "N/A"}`;
-      const qty = Number(user.data.productQuantity || 1);
-      const productName = user.data.selectedProduct?.label || user.data.productType || "Product";
-      const packLabel = user.data.selectedProduct?.packLabel
-        ? ` x ${user.data.selectedProduct.packLabel}`
-        : "";
 
-      await delay(400);
-      await sendMessage(
-        `🎉 Your order is confirmed!\n\nOrder ID: ${orderRef}\nProduct: ${productName}\nQuantity: ${qty}${packLabel}\nExpected Delivery: 3–5 days\n\nWe'll send updates here on WhatsApp.\nNeed help? Type SUPPORT.`
-      );
-      await delay(400);
-      await sendMessage(
-        `📦 Shipping Update\nYour order ${orderRef} has been placed and is being prepared.\nType *TRACK ORDER* anytime for latest updates.`
-      );
-      await delay(400);
-      await sendMessage(
-        "⭐ Review Request\nHope you loved your order ❤️\nAfter delivery, please rate your experience ⭐⭐⭐⭐⭐"
-      );
+      await delay(300);
+      await sendMessage(buildPaymentSummaryForCustomer({ verification, intent: paymentIntent }));
+
+      if (isPartial) {
+        const dueAmount = Number(createdOrder?.payment_total) - paidAmount;
+        const dueLabel =
+          Number.isFinite(dueAmount) && dueAmount > 0
+            ? formatCurrencyAmount(dueAmount, paymentIntent?.currency || RAZORPAY_CURRENCY)
+            : "remaining amount";
+        await delay(300);
+        await sendMessage(
+          `✅ Advance payment noted: ${formatCurrencyAmount(
+            paidAmount,
+            paymentIntent?.currency || RAZORPAY_CURRENCY
+          )}\nRemaining: ${dueLabel} (payable on delivery).`
+        );
+      }
+
+      await sendConfirmedOrderMessages({ sendMessage, createdOrder, user });
       resetProductFlowData(user);
       user.step = "MENU";
       return;
     }
 
     /* ===============================
-       STEP 13: EXECUTIVE MESSAGE
+       STEP 14: PAYMENT PROOF HOLD
+       =============================== */
+    if (user.step === "PRODUCT_PAYMENT_PROOF") {
+      const paymentIntent = user.data.orderPaymentIntent || user.data.pendingPaymentVerification || null;
+      if (!paymentIntent) {
+        await sendMessage("Please choose payment method again so I can generate a fresh payment link.");
+        await delay(300);
+        await sendMessage(buildPaymentMethodPrompt());
+        user.step = "PRODUCT_PAYMENT_METHOD";
+        return;
+      }
+
+      const proofId = extractPaymentProofId(messageText);
+      const hasScreenshot = Boolean(message?.hasMedia);
+      if (!proofId && !hasScreenshot) {
+        await sendMessage(PAYMENT_PROOF_PROMPT);
+        return;
+      }
+
+      let verification = null;
+      try {
+        verification = await verifyIntentPayment({
+          intent: paymentIntent,
+          proofId,
+        });
+      } catch (error) {
+        logger.error("Razorpay proof verification failed", {
+          adminId: assignedAdminId,
+          flowStep: user.step,
+          error: error?.message || String(error),
+        });
+      }
+
+      if (verification?.verified) {
+        const paidAmount = Number(verification?.paidAmount);
+        const totalAmount = Number(paymentIntent?.totalAmount);
+        const isPartial =
+          Number.isFinite(totalAmount) &&
+          totalAmount > 0 &&
+          Number.isFinite(paidAmount) &&
+          paidAmount + 0.01 < totalAmount;
+
+        const createdOrder = await createWhatsAppOrder({
+          user,
+          adminId: assignedAdminId,
+          fallbackPhone: phone,
+          paymentMethod: "online",
+          paymentStatus: isPartial ? "pending" : "paid",
+          paymentPaid: Number.isFinite(paidAmount) ? paidAmount : null,
+          paymentCurrency: verification?.currency || paymentIntent?.currency || RAZORPAY_CURRENCY,
+          paymentNotes: buildOnlinePaymentNotes(paymentIntent, verification),
+        });
+        if (!createdOrder?.id) {
+          await sendMessage(
+            "Sorry, we could not place your order right now due to a system issue. Please try again."
+          );
+          return;
+        }
+
+        await delay(300);
+        await sendMessage(buildPaymentSummaryForCustomer({ verification, intent: paymentIntent }));
+        if (isPartial) {
+          const dueAmount = Number(createdOrder?.payment_total) - paidAmount;
+          const dueLabel =
+            Number.isFinite(dueAmount) && dueAmount > 0
+              ? formatCurrencyAmount(dueAmount, paymentIntent?.currency || RAZORPAY_CURRENCY)
+              : "remaining amount";
+          await delay(300);
+          await sendMessage(
+            `✅ Advance payment noted: ${formatCurrencyAmount(
+              paidAmount,
+              paymentIntent?.currency || RAZORPAY_CURRENCY
+            )}\nRemaining: ${dueLabel} (payable on delivery).`
+          );
+        }
+        await sendConfirmedOrderMessages({ sendMessage, createdOrder, user });
+        resetProductFlowData(user);
+        user.step = "MENU";
+        return;
+      }
+
+      const holdNotes = buildPaymentHoldNotes({
+        intent: paymentIntent,
+        verification,
+        proofId,
+        hasScreenshot,
+      });
+      const holdOrder = await createWhatsAppOrder({
+        user,
+        adminId: assignedAdminId,
+        fallbackPhone: phone,
+        paymentMethod: "online",
+        paymentStatus: "pending",
+        paymentPaid:
+          Number.isFinite(Number(verification?.paidAmount)) && Number(verification?.paidAmount) > 0
+            ? Number(verification.paidAmount)
+            : 0,
+        paymentCurrency: verification?.currency || paymentIntent?.currency || RAZORPAY_CURRENCY,
+        paymentNotes: holdNotes,
+      });
+
+      await notifyPaymentProofToAdmin({
+        client,
+        user,
+        phone,
+        proofId,
+        intent: paymentIntent,
+        verification,
+        hasScreenshot,
+      });
+
+      await delay(300);
+      await sendMessage(
+        "Sorry to say, your payment will be on hold until manual verification is completed."
+      );
+      await delay(300);
+      if (holdOrder?.order_number || holdOrder?.id) {
+        await sendMessage(
+          `Your order is created with payment hold status.\nOrder ID: ${
+            holdOrder?.order_number || `#${holdOrder?.id}`
+          }\nOur team will cross-check the transaction ID and screenshot, then confirm.`
+        );
+      } else {
+        await sendMessage("Our team will cross-check your payment proof and confirm shortly.");
+      }
+      resetProductFlowData(user);
+      user.step = "MENU";
+      return;
+    }
+
+    /* ===============================
+       STEP 15: EXECUTIVE MESSAGE
        =============================== */
     if (user.step === "EXECUTIVE_MESSAGE") {
+      if (isOwnerManagerRequest(messageText)) {
+        await startOwnerManagerCallbackFlow({
+          user,
+          sendMessage,
+          appointmentSettings,
+          initialMessage: messageText,
+        });
+        return;
+      }
       user.data.executiveMessage = sanitizeText(messageText, 1000);
       user.data.message = buildRequirementSummary({ user, phone });
 
@@ -4075,7 +5282,14 @@ const handleIncomingMessage = async ({
   } finally {
     // NEW: Persist state hook (Task 10.1)
     // Requirements: 3.1, 3.3, 8.3, 8.4, 12.1, 12.2, 12.3
-    if (sessionStateManager && sessionStateManager.isEnabled() && session?.users?.[sender]) {
+    if (
+      sessionStateManager &&
+      sessionStateManager.isEnabled() &&
+      sender &&
+      phone &&
+      Number.isFinite(Number(activeAdminId)) &&
+      session?.users?.[sender]
+    ) {
       const user = session.users[sender];
       sessionStateManager.persistState(activeAdminId, phone, user).catch(err => {
         logger.error('Failed to persist session state', {
@@ -4123,7 +5337,7 @@ async function fetchPendingIncomingMessages(adminId) {
           WHERE m.user_id = c.id
             AND m.admin_id = ?
             AND m.message_type = 'incoming'
-            AND m.created_at >= NOW() - ($2::interval)
+            AND m.created_at >= NOW() - (?::interval)
           ORDER BY m.created_at DESC
           LIMIT 1
         ) mi ON true
@@ -4164,7 +5378,7 @@ async function fetchPendingIncomingMessages(adminId) {
           WHERE m.user_id = c.id
             AND m.admin_id = ?
             AND m.message_type = 'incoming'
-            AND m.created_at >= NOW() - ($2::interval)
+            AND m.created_at >= NOW() - (?::interval)
           ORDER BY m.created_at DESC
           LIMIT 1
         ) mi ON true

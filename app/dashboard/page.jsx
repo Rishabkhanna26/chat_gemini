@@ -2,11 +2,25 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faMessage, faUsers, faCircleCheck, faCircleExclamation, faCalendarPlus, faCartShopping, faCalendarCheck } from '@fortawesome/free-solid-svg-icons';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
 import { hasProductAccess, hasServiceAccess } from '../../lib/business.js';
+
+const OVERVIEW_METRICS = [
+	{ key: 'total_users', name: 'Users' },
+	{ key: 'incoming_messages', name: 'Messages' },
+	{ key: 'active_requirements', name: 'Requirements' },
+	{ key: 'open_needs', name: 'Open Needs' },
+	{ key: 'total_orders', name: 'Orders' },
+	{ key: 'total_appointments', name: 'Appointments' },
+];
+
+const toCount = (value) => {
+	const num = Number(value);
+	return Number.isFinite(num) ? num : 0;
+};
 
 export default function DashboardPage() {
 	const router = useRouter();
@@ -19,6 +33,10 @@ export default function DashboardPage() {
 		ai_prompt: '',
 		ai_blocklist: '',
 		automation_enabled: true,
+		appointment_start_hour: 9,
+		appointment_end_hour: 20,
+		appointment_slot_minutes: 60,
+		appointment_window_months: 3,
 	});
 	const [aiSaving, setAiSaving] = useState(false);
 	const [aiStatus, setAiStatus] = useState('');
@@ -46,6 +64,18 @@ export default function DashboardPage() {
 				ai_prompt: aiData?.data?.ai_prompt || '',
 				ai_blocklist: aiData?.data?.ai_blocklist || '',
 				automation_enabled: aiData?.data?.automation_enabled !== false,
+				appointment_start_hour: Number.isInteger(aiData?.data?.appointment_start_hour)
+					? aiData.data.appointment_start_hour
+					: 9,
+				appointment_end_hour: Number.isInteger(aiData?.data?.appointment_end_hour)
+					? aiData.data.appointment_end_hour
+					: 20,
+				appointment_slot_minutes: Number.isInteger(aiData?.data?.appointment_slot_minutes)
+					? aiData.data.appointment_slot_minutes
+					: 60,
+				appointment_window_months: Number.isInteger(aiData?.data?.appointment_window_months)
+					? aiData.data.appointment_window_months
+					: 3,
 			});
 		} catch (error) {
 			console.error('Failed to fetch dashboard data:', error);
@@ -57,6 +87,11 @@ export default function DashboardPage() {
 	async function saveAiSettings() {
 		setAiSaving(true);
 		setAiStatus('');
+		if (aiSettings.appointment_end_hour <= aiSettings.appointment_start_hour) {
+			setAiStatus('End hour must be greater than start hour.');
+			setAiSaving(false);
+			return;
+		}
 		try {
 			const response = await fetch('/api/ai-settings', {
 				method: 'PUT',
@@ -72,6 +107,18 @@ export default function DashboardPage() {
 				ai_prompt: data?.data?.ai_prompt || '',
 				ai_blocklist: data?.data?.ai_blocklist || '',
 				automation_enabled: data?.data?.automation_enabled !== false,
+				appointment_start_hour: Number.isInteger(data?.data?.appointment_start_hour)
+					? data.data.appointment_start_hour
+					: 9,
+				appointment_end_hour: Number.isInteger(data?.data?.appointment_end_hour)
+					? data.data.appointment_end_hour
+					: 20,
+				appointment_slot_minutes: Number.isInteger(data?.data?.appointment_slot_minutes)
+					? data.data.appointment_slot_minutes
+					: 60,
+				appointment_window_months: Number.isInteger(data?.data?.appointment_window_months)
+					? data.data.appointment_window_months
+					: 3,
 			});
 			setAiStatus('Automation settings saved.');
 			setTimeout(() => setAiStatus(''), 2000);
@@ -93,12 +140,17 @@ export default function DashboardPage() {
 		);
 	}
 
-	const chartData = [
-		{ name: 'Users', value: stats?.total_users || 0 },
-		{ name: 'Messages', value: stats?.incoming_messages || 0 },
-		{ name: 'Requirements', value: stats?.active_requirements || 0 },
-		{ name: 'Open Needs', value: stats?.open_needs || 0 }
-	];
+	const overviewData = OVERVIEW_METRICS.map((metric) => ({
+		name: metric.name,
+		value: toCount(stats?.[metric.key]),
+	})).filter((metric) => metric.value > 0 || ['Users', 'Messages', 'Requirements', 'Open Needs'].includes(metric.name));
+
+	const growthTrendData = Array.isArray(stats?.growth_trend) && stats.growth_trend.length > 0
+		? stats.growth_trend.map((point) => ({
+			name: point?.label || point?.date || '',
+			value: toCount(point?.value),
+		}))
+		: overviewData;
 
 	const recentMessages = messages.slice(0, 5);
   const showOrders = Boolean(user?.id) && hasProductAccess(user);
@@ -109,7 +161,7 @@ export default function DashboardPage() {
 			{/* Header */}
 			<div>
 				<h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900">Dashboard</h1>
-				<p className="text-gray-600 mt-2">Welcome back! Here's your business overview.</p>
+				<p className="text-gray-600 mt-2">Welcome back! Here&apos;s your business overview.</p>
 			</div>
 
 			{/* Quick Actions */}
@@ -216,31 +268,37 @@ export default function DashboardPage() {
 			</div>
 
 			{/* Charts Row */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-				<div className="bg-white p-4 sm:p-6 rounded-lg border border-gray-200 shadow-sm">
-					<h2 className="text-xl font-bold text-gray-900 mb-4">Overview</h2>
-					<ResponsiveContainer width="100%" height={300}>
-						<BarChart data={chartData}>
-							<CartesianGrid strokeDasharray="3 3" />
-							<XAxis dataKey="name" />
-							<YAxis />
-							<Tooltip />
-							<Bar dataKey="value" fill="#FF6B35" radius={[8, 8, 0, 0]} />
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+					<div className="bg-white p-4 sm:p-6 rounded-lg border border-gray-200 shadow-sm">
+						<h2 className="text-xl font-bold text-gray-900 mb-4">Overview</h2>
+						<ResponsiveContainer width="100%" height={300}>
+							<BarChart data={overviewData}>
+								<CartesianGrid strokeDasharray="3 3" />
+								<XAxis dataKey="name" />
+								<YAxis />
+								<Tooltip />
+								<Bar dataKey="value" fill="#FF6B35" radius={[8, 8, 0, 0]} />
 						</BarChart>
 					</ResponsiveContainer>
 				</div>
 
-				<div className="bg-white p-4 sm:p-6 rounded-lg border border-gray-200 shadow-sm">
-					<h2 className="text-xl font-bold text-gray-900 mb-4">Growth Trend</h2>
-					<ResponsiveContainer width="100%" height={300}>
-						<LineChart data={chartData}>
-							<CartesianGrid strokeDasharray="3 3" />
-							<XAxis dataKey="name" />
-							<YAxis />
-							<Tooltip />
-							<Line type="monotone" dataKey="value" stroke="#FF6B35" strokeWidth={2} dot={{ fill: '#FF6B35', r: 5 }} />
-						</LineChart>
-					</ResponsiveContainer>
+					<div className="bg-white p-4 sm:p-6 rounded-lg border border-gray-200 shadow-sm">
+						<h2 className="text-xl font-bold text-gray-900 mb-4">Growth Trend</h2>
+						<ResponsiveContainer width="100%" height={300}>
+							<LineChart data={growthTrendData}>
+								<CartesianGrid strokeDasharray="3 3" />
+								<XAxis
+									dataKey="name"
+									interval={Math.max(0, Math.ceil(growthTrendData.length / 8) - 1)}
+									angle={growthTrendData.length > 10 ? -30 : 0}
+									textAnchor={growthTrendData.length > 10 ? 'end' : 'middle'}
+									height={growthTrendData.length > 10 ? 60 : 30}
+								/>
+								<YAxis />
+								<Tooltip />
+								<Line type="monotone" dataKey="value" stroke="#FF6B35" strokeWidth={2} dot={{ fill: '#FF6B35', r: 5 }} />
+							</LineChart>
+						</ResponsiveContainer>
 				</div>
 			</div>
 
@@ -339,13 +397,90 @@ export default function DashboardPage() {
 						/>
 					</div>
 				</div>
+				<div className="rounded-lg border border-gray-200 p-4 mb-4">
+					<h3 className="text-sm font-semibold text-gray-900 mb-1">Appointment Booking Rules</h3>
+					<p className="text-xs text-gray-500 mb-4">
+						These control WhatsApp appointment slots and can be changed anytime.
+					</p>
+					<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Start Hour (0-23)
+							</label>
+							<input
+								type="number"
+								min="0"
+								max="23"
+								value={aiSettings.appointment_start_hour}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({ ...prev, appointment_start_hour: next }));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								End Hour (1-24)
+							</label>
+							<input
+								type="number"
+								min="1"
+								max="24"
+								value={aiSettings.appointment_end_hour}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({ ...prev, appointment_end_hour: next }));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Slot Minutes
+							</label>
+							<input
+								type="number"
+								min="15"
+								max="240"
+								step="5"
+								value={aiSettings.appointment_slot_minutes}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({ ...prev, appointment_slot_minutes: next }));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Window (Months)
+							</label>
+							<input
+								type="number"
+								min="1"
+								max="24"
+								value={aiSettings.appointment_window_months}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({ ...prev, appointment_window_months: next }));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+					</div>
+				</div>
 				<div className="flex flex-col gap-3 sm:flex-row sm:items-center">
 					<button
 						onClick={saveAiSettings}
 						disabled={aiSaving}
 						className="px-5 py-2 rounded-full bg-aa-orange text-white font-semibold disabled:opacity-60 disabled:cursor-not-allowed"
 					>
-						{aiSaving ? 'Saving...' : 'Save AI Settings'}
+						{aiSaving ? 'Saving...' : 'Save Automation Settings'}
 					</button>
 					{aiStatus && (
 						<span className={`text-sm font-semibold ${aiStatus.includes('Failed') ? 'text-red-600' : 'text-green-600'}`}>

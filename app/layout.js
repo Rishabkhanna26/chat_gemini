@@ -5,6 +5,11 @@ import { AuthProvider } from './components/auth/AuthProvider.jsx'
 export const metadata = {
   title: 'AlgoAura - WhatsApp CRM Dashboard',
   description: 'Manage your WhatsApp conversations, leads, and broadcasts',
+  icons: {
+    icon: '/algoaura_logo.png',
+    shortcut: '/algoaura_logo.png',
+    apple: '/algoaura_logo.png',
+  },
 }
 
 export default function RootLayout({ children }) {

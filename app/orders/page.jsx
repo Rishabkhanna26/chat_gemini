@@ -37,6 +37,7 @@ const STATUS_VARIANTS = {
 
 const PAYMENT_VARIANTS = {
   pending: 'yellow',
+  partial: 'yellow',
   paid: 'green',
   failed: 'red',
   refunded: 'red',
@@ -92,6 +93,67 @@ const getItemCount = (order) => {
 
 const normalizeText = (value) => String(value || '').toLowerCase();
 
+const parseTimerMinutes = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return NaN;
+  const rounded = Math.round(minutes);
+  if (!Number.isFinite(rounded) || rounded <= 0 || rounded > 7 * 24 * 60) return NaN;
+  return rounded;
+};
+
+const getPaymentTotal = (order) => {
+  const paymentTotal = Number(order?.payment_total);
+  if (Number.isFinite(paymentTotal) && paymentTotal > 0) return paymentTotal;
+  return getOrderTotal(order);
+};
+
+const getPaymentPaid = (order) => {
+  const paymentPaid = Number(order?.payment_paid);
+  if (!Number.isFinite(paymentPaid) || paymentPaid <= 0) return 0;
+  return paymentPaid;
+};
+
+const getPaymentDue = (order) => {
+  const due = getPaymentTotal(order) - getPaymentPaid(order);
+  return Number.isFinite(due) && due > 0 ? Number(due.toFixed(2)) : 0;
+};
+
+const getPaymentProgress = (order) => {
+  const total = getPaymentTotal(order);
+  const paid = getPaymentPaid(order);
+  if (!Number.isFinite(total) || total <= 0) return { label: 'N/A', variant: 'default' };
+  if (paid <= 0) return { label: 'Unpaid', variant: 'red' };
+  if (paid + 0.01 < total) return { label: 'Partial', variant: 'yellow' };
+  return { label: 'Full', variant: 'green' };
+};
+
+const getPaymentSummaryLine = (order) => {
+  const total = getPaymentTotal(order);
+  const paid = getPaymentPaid(order);
+  const due = getPaymentDue(order);
+  const currency = order?.payment_currency || order?.currency || 'INR';
+  if (!Number.isFinite(total) || total <= 0) return 'Amount not set';
+  if (paid <= 0) return `${formatCurrency(total, currency)} pending`;
+  if (due > 0) return `${formatCurrency(paid, currency)} paid • ${formatCurrency(due, currency)} due`;
+  return `${formatCurrency(total, currency)} received`;
+};
+
+const extractPaymentReference = (notes) => {
+  const text = String(notes || '');
+  if (!text.trim()) return '';
+  const matchers = [
+    /transaction id:\s*([a-zA-Z0-9._-]{6,80})/i,
+    /payment id:\s*([a-zA-Z0-9._-]{6,80})/i,
+    /proof id:\s*([a-zA-Z0-9._-]{6,80})/i,
+  ];
+  for (const matcher of matchers) {
+    const match = text.match(matcher);
+    if (match?.[1]) return match[1];
+  }
+  return '';
+};
+
 export default function OrdersPage() {
   const router = useRouter();
   const { user, loading: authLoading } = useAuth();
@@ -110,6 +172,11 @@ export default function OrdersPage() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [activeOrder, setActiveOrder] = useState(null);
   const [noteDraft, setNoteDraft] = useState('');
+  const [sendingPaymentLink, setSendingPaymentLink] = useState(false);
+  const [schedulingPaymentLink, setSchedulingPaymentLink] = useState(false);
+  const [paymentLinkFeedback, setPaymentLinkFeedback] = useState({ type: '', text: '' });
+  const [paymentLinkScheduleAt, setPaymentLinkScheduleAt] = useState('');
+  const [paymentLinkTimerMinutes, setPaymentLinkTimerMinutes] = useState('');
 
   const hasOrderAccess = Boolean(user?.id) && hasProductAccess(user);
 
@@ -145,6 +212,11 @@ export default function OrdersPage() {
 
   useEffect(() => {
     setNoteDraft('');
+    setSendingPaymentLink(false);
+    setSchedulingPaymentLink(false);
+    setPaymentLinkFeedback({ type: '', text: '' });
+    setPaymentLinkScheduleAt('');
+    setPaymentLinkTimerMinutes('');
   }, [activeOrder?.id]);
 
   const filteredOrders = useMemo(() => {
@@ -155,11 +227,15 @@ export default function OrdersPage() {
     return orders.filter((order) => {
       const statusValue = normalizeText(order.status);
       const paymentValue = normalizeText(order.payment_status);
+      const paymentProgressValue = normalizeText(getPaymentProgress(order).label);
       const fulfillmentValue = normalizeText(order.fulfillment_status);
       const channelValue = normalizeText(order.channel);
 
       if (filters.status !== 'all' && statusValue !== filters.status) return false;
-      if (filters.payment !== 'all' && paymentValue !== filters.payment) return false;
+      if (filters.payment === 'partial' && paymentProgressValue !== 'partial') return false;
+      if (filters.payment !== 'all' && filters.payment !== 'partial' && paymentValue !== filters.payment) {
+        return false;
+      }
       if (filters.fulfillment !== 'all' && fulfillmentValue !== filters.fulfillment) return false;
       if (filters.channel !== 'all' && channelValue !== filters.channel) return false;
 
@@ -238,7 +314,14 @@ export default function OrdersPage() {
     setActiveOrder((prev) => (prev?.id === orderId ? { ...prev, ...updates } : prev));
   };
 
+  const restoreOrderSnapshot = (orderId, snapshot) => {
+    if (!snapshot) return;
+    setOrders((prev) => prev.map((order) => (order.id === orderId ? snapshot : order)));
+    setActiveOrder((prev) => (prev?.id === orderId ? snapshot : prev));
+  };
+
   const updateOrder = async (orderId, updates) => {
+    const previousSnapshot = orders.find((order) => order.id === orderId) || null;
     applyOrderUpdate(orderId, updates);
     try {
       const response = await fetch(`/api/orders/${orderId}`, {
@@ -248,7 +331,8 @@ export default function OrdersPage() {
         body: JSON.stringify(updates),
       });
       if (!response.ok) {
-        throw new Error('Unable to sync order changes yet.');
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || 'Unable to sync order changes yet.');
       }
       const data = await response.json();
       if (data?.data) {
@@ -256,6 +340,7 @@ export default function OrdersPage() {
       }
       setSyncWarning('');
     } catch (err) {
+      restoreOrderSnapshot(orderId, previousSnapshot);
       setSyncWarning(err.message || 'Orders API not connected. Changes saved locally.');
     }
   };
@@ -276,6 +361,130 @@ export default function OrdersPage() {
     const nextNotes = [...(activeOrder.notes || []), nextNote];
     updateOrder(activeOrder.id, { notes: nextNotes });
     setNoteDraft('');
+  };
+
+  const sendRemainingPaymentLink = async () => {
+    if (!activeOrder?.id) return;
+    const dueAmount = getPaymentDue(activeOrder);
+    if (!Number.isFinite(dueAmount) || dueAmount <= 0) {
+      setPaymentLinkFeedback({ type: 'error', text: 'No remaining amount to collect for this order.' });
+      return;
+    }
+    if (!String(activeOrder.customer_phone || '').trim()) {
+      setPaymentLinkFeedback({ type: 'error', text: 'Customer phone is missing on this order.' });
+      return;
+    }
+
+    setSendingPaymentLink(true);
+    setPaymentLinkFeedback({ type: '', text: '' });
+    try {
+      const response = await fetch(`/api/orders/${activeOrder.id}/payment-link`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success === false) {
+        throw new Error(payload?.error || 'Unable to send payment link.');
+      }
+
+      if (payload?.data?.order) {
+        applyOrderUpdate(activeOrder.id, payload.data.order);
+      }
+      const sentAmount = Number(payload?.data?.payment_link?.amount || dueAmount);
+      const sentCurrency =
+        payload?.data?.payment_link?.currency ||
+        activeOrder.payment_currency ||
+        activeOrder.currency ||
+        'INR';
+      setPaymentLinkFeedback({
+        type: 'success',
+        text: `Remaining payment link sent for ${formatCurrency(sentAmount, sentCurrency)}.`,
+      });
+    } catch (err) {
+      setPaymentLinkFeedback({
+        type: 'error',
+        text: err.message || 'Unable to send payment link.',
+      });
+    } finally {
+      setSendingPaymentLink(false);
+    }
+  };
+
+  const scheduleRemainingPaymentLink = async () => {
+    if (!activeOrder?.id) return;
+    const dueAmount = getPaymentDue(activeOrder);
+    if (!Number.isFinite(dueAmount) || dueAmount <= 0) {
+      setPaymentLinkFeedback({ type: 'error', text: 'No remaining amount to collect for this order.' });
+      return;
+    }
+    if (!String(activeOrder.customer_phone || '').trim()) {
+      setPaymentLinkFeedback({ type: 'error', text: 'Customer phone is missing on this order.' });
+      return;
+    }
+    const timerMinutes = parseTimerMinutes(paymentLinkTimerMinutes);
+    if (Number.isNaN(timerMinutes)) {
+      setPaymentLinkFeedback({
+        type: 'error',
+        text: 'Invalid timer. Enter minutes between 1 and 10080.',
+      });
+      return;
+    }
+    if (!paymentLinkScheduleAt && !Number.isFinite(timerMinutes)) {
+      setPaymentLinkFeedback({
+        type: 'error',
+        text: 'Choose schedule date/time or set timer minutes first.',
+      });
+      return;
+    }
+
+    let scheduledDate = null;
+    if (paymentLinkScheduleAt) {
+      scheduledDate = new Date(paymentLinkScheduleAt);
+      if (Number.isNaN(scheduledDate.getTime())) {
+        setPaymentLinkFeedback({ type: 'error', text: 'Invalid schedule time.' });
+        return;
+      }
+    } else if (Number.isFinite(timerMinutes)) {
+      scheduledDate = new Date(Date.now() + timerMinutes * 60 * 1000);
+    }
+
+    if (scheduledDate.getTime() <= Date.now() + 15000) {
+      setPaymentLinkFeedback({
+        type: 'error',
+        text: 'Schedule time must be at least 15 seconds in the future.',
+      });
+      return;
+    }
+
+    setSchedulingPaymentLink(true);
+    setPaymentLinkFeedback({ type: '', text: '' });
+    try {
+      const response = await fetch(`/api/orders/${activeOrder.id}/payment-link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          scheduled_for: scheduledDate.toISOString(),
+          ...(Number.isFinite(timerMinutes) ? { timer_minutes: timerMinutes } : {}),
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success === false) {
+        throw new Error(payload?.error || 'Unable to schedule payment link.');
+      }
+      const displayTime = new Date(payload?.data?.timer?.scheduled_for || scheduledDate.toISOString());
+      setPaymentLinkFeedback({
+        type: 'success',
+        text: `Payment link scheduled for ${displayTime.toLocaleString()}.`,
+      });
+    } catch (err) {
+      setPaymentLinkFeedback({
+        type: 'error',
+        text: err.message || 'Unable to schedule payment link.',
+      });
+    } finally {
+      setSchedulingPaymentLink(false);
+    }
   };
 
   if (authLoading) {
@@ -425,6 +634,7 @@ export default function OrdersPage() {
               className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
             >
               <option value="all">All</option>
+              <option value="partial">Partial</option>
               <option value="pending">Pending</option>
               <option value="paid">Paid</option>
               <option value="failed">Failed</option>
@@ -552,107 +762,121 @@ export default function OrdersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredOrders.map((order) => (
-                    <tr key={order.id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="py-3 px-3">
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(order.id)}
-                          onChange={() => toggleSelect(order.id)}
-                        />
-                      </td>
-                      <td className="py-3 px-3">
-                        <div className="font-semibold text-aa-text-dark">
-                          {order.order_number || `#${order.id}`}
-                        </div>
-                        <div className="text-xs text-aa-gray">{order.channel || 'WhatsApp'}</div>
-                      </td>
-                      <td className="py-3 px-3">
-                        <div className="font-semibold text-aa-text-dark">{order.customer_name || 'Unknown'}</div>
-                        <div className="text-xs text-aa-gray">{order.customer_phone || '—'}</div>
-                      </td>
-                      <td className="py-3 px-3 text-sm text-aa-text-dark">
-                        {getItemCount(order)} items
-                      </td>
-                      <td className="py-3 px-3 text-sm font-semibold text-aa-text-dark">
-                        {formatCurrency(getOrderTotal(order), order.currency || 'INR')}
-                      </td>
-                      <td className="py-3 px-3">
-                        <Badge variant={PAYMENT_VARIANTS[order.payment_status] || 'default'}>
-                          {order.payment_status || 'pending'}
-                        </Badge>
-                      </td>
-                      <td className="py-3 px-3">
-                        <Badge variant={FULFILLMENT_VARIANTS[order.fulfillment_status] || 'default'}>
-                          {order.fulfillment_status || 'unfulfilled'}
-                        </Badge>
-                      </td>
-                      <td className="py-3 px-3">
-                        <Badge variant={STATUS_VARIANTS[order.status] || 'default'}>
-                          {order.status || 'new'}
-                        </Badge>
-                      </td>
-                      <td className="py-3 px-3 text-xs text-aa-gray">
-                        {formatDateTime(order.placed_at || order.created_at)}
-                      </td>
-                      <td className="py-3 px-3">
-                        <button
-                          className="text-aa-orange font-semibold text-sm hover:underline"
-                          onClick={() => setActiveOrder(order)}
-                        >
-                          View
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredOrders.map((order) => {
+                    const paymentProgress = getPaymentProgress(order);
+                    return (
+                      <tr key={order.id} className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="py-3 px-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(order.id)}
+                            onChange={() => toggleSelect(order.id)}
+                          />
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="font-semibold text-aa-text-dark">
+                            {order.order_number || `#${order.id}`}
+                          </div>
+                          <div className="text-xs text-aa-gray">{order.channel || 'WhatsApp'}</div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="font-semibold text-aa-text-dark">{order.customer_name || 'Unknown'}</div>
+                          <div className="text-xs text-aa-gray">{order.customer_phone || '—'}</div>
+                        </td>
+                        <td className="py-3 px-3 text-sm text-aa-text-dark">
+                          {getItemCount(order)} items
+                        </td>
+                        <td className="py-3 px-3 text-sm font-semibold text-aa-text-dark">
+                          {formatCurrency(getOrderTotal(order), order.currency || 'INR')}
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="flex flex-wrap gap-1.5">
+                            <Badge variant={paymentProgress.variant}>{paymentProgress.label}</Badge>
+                            <Badge variant={PAYMENT_VARIANTS[order.payment_status] || 'default'}>
+                              {order.payment_status || 'pending'}
+                            </Badge>
+                          </div>
+                          <p className="mt-1 text-xs text-aa-gray">{getPaymentSummaryLine(order)}</p>
+                        </td>
+                        <td className="py-3 px-3">
+                          <Badge variant={FULFILLMENT_VARIANTS[order.fulfillment_status] || 'default'}>
+                            {order.fulfillment_status || 'unfulfilled'}
+                          </Badge>
+                        </td>
+                        <td className="py-3 px-3">
+                          <Badge variant={STATUS_VARIANTS[order.status] || 'default'}>
+                            {order.status || 'new'}
+                          </Badge>
+                        </td>
+                        <td className="py-3 px-3 text-xs text-aa-gray">
+                          {formatDateTime(order.placed_at || order.created_at)}
+                        </td>
+                        <td className="py-3 px-3">
+                          <button
+                            className="text-aa-orange font-semibold text-sm hover:underline"
+                            onClick={() => setActiveOrder(order)}
+                          >
+                            View
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
 
           <div className="space-y-4 lg:hidden">
-            {filteredOrders.map((order) => (
-              <Card key={order.id} className="p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-aa-text-dark">
-                      {order.order_number || `#${order.id}`}
-                    </p>
-                    <p className="text-xs text-aa-gray">{order.channel || 'WhatsApp'}</p>
+            {filteredOrders.map((order) => {
+              const paymentProgress = getPaymentProgress(order);
+              return (
+                <Card key={order.id} className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-aa-text-dark">
+                        {order.order_number || `#${order.id}`}
+                      </p>
+                      <p className="text-xs text-aa-gray">{order.channel || 'WhatsApp'}</p>
+                    </div>
+                    <Badge variant={STATUS_VARIANTS[order.status] || 'default'}>
+                      {order.status || 'new'}
+                    </Badge>
                   </div>
-                  <Badge variant={STATUS_VARIANTS[order.status] || 'default'}>
-                    {order.status || 'new'}
-                  </Badge>
-                </div>
-                <div className="mt-3 flex items-center gap-2 text-sm text-aa-text-dark">
-                  <FontAwesomeIcon icon={faUser} className="text-aa-gray" />
-                  <span>{order.customer_name || 'Unknown'}</span>
-                </div>
-                <div className="mt-2 flex items-center gap-2 text-sm text-aa-text-dark">
-                  <FontAwesomeIcon icon={faCartShopping} className="text-aa-gray" />
-                  <span>{getItemCount(order)} items</span>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Badge variant={PAYMENT_VARIANTS[order.payment_status] || 'default'}>
-                    {order.payment_status || 'pending'}
-                  </Badge>
-                  <Badge variant={FULFILLMENT_VARIANTS[order.fulfillment_status] || 'default'}>
-                    {order.fulfillment_status || 'unfulfilled'}
-                  </Badge>
-                </div>
-                <div className="mt-4 flex items-center justify-between">
-                  <p className="font-semibold text-aa-text-dark">
-                    {formatCurrency(getOrderTotal(order), order.currency || 'INR')}
-                  </p>
-                  <button
-                    className="text-aa-orange font-semibold text-sm hover:underline"
-                    onClick={() => setActiveOrder(order)}
-                  >
-                    View
-                  </button>
-                </div>
-              </Card>
-            ))}
+                  <div className="mt-3 flex items-center gap-2 text-sm text-aa-text-dark">
+                    <FontAwesomeIcon icon={faUser} className="text-aa-gray" />
+                    <span>{order.customer_name || 'Unknown'}</span>
+                  </div>
+                  <div className="mt-2 flex items-center gap-2 text-sm text-aa-text-dark">
+                    <FontAwesomeIcon icon={faCartShopping} className="text-aa-gray" />
+                    <span>{getItemCount(order)} items</span>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Badge variant={paymentProgress.variant}>
+                      {paymentProgress.label}
+                    </Badge>
+                    <Badge variant={PAYMENT_VARIANTS[order.payment_status] || 'default'}>
+                      {order.payment_status || 'pending'}
+                    </Badge>
+                    <Badge variant={FULFILLMENT_VARIANTS[order.fulfillment_status] || 'default'}>
+                      {order.fulfillment_status || 'unfulfilled'}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 text-xs text-aa-gray">{getPaymentSummaryLine(order)}</p>
+                  <div className="mt-4 flex items-center justify-between">
+                    <p className="font-semibold text-aa-text-dark">
+                      {formatCurrency(getOrderTotal(order), order.currency || 'INR')}
+                    </p>
+                    <button
+                      className="text-aa-orange font-semibold text-sm hover:underline"
+                      onClick={() => setActiveOrder(order)}
+                    >
+                      View
+                    </button>
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         </>
       )}
@@ -717,6 +941,70 @@ export default function OrdersPage() {
                       {formatCurrency(getOrderTotal(activeOrder), activeOrder.currency || 'INR')}
                     </p>
                   </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 p-4">
+                  <p className="text-sm font-semibold text-aa-text-dark mb-3">Payment Summary</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Payment Status</p>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        <Badge variant={PAYMENT_VARIANTS[activeOrder.payment_status] || 'default'}>
+                          {activeOrder.payment_status || 'pending'}
+                        </Badge>
+                        <Badge variant={getPaymentProgress(activeOrder).variant}>
+                          {getPaymentProgress(activeOrder).label}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Method</p>
+                      <p className="mt-1 text-aa-text-dark font-semibold">
+                        {activeOrder.payment_method || '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Total</p>
+                      <p className="mt-1 text-aa-text-dark font-semibold">
+                        {formatCurrency(
+                          getPaymentTotal(activeOrder),
+                          activeOrder.payment_currency || activeOrder.currency || 'INR'
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Paid</p>
+                      <p className="mt-1 text-aa-text-dark font-semibold">
+                        {formatCurrency(
+                          getPaymentPaid(activeOrder),
+                          activeOrder.payment_currency || activeOrder.currency || 'INR'
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Due</p>
+                      <p className="mt-1 text-aa-text-dark font-semibold">
+                        {formatCurrency(
+                          getPaymentDue(activeOrder),
+                          activeOrder.payment_currency || activeOrder.currency || 'INR'
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Transaction / Proof ID</p>
+                      <p className="mt-1 text-aa-text-dark break-all">
+                        {extractPaymentReference(activeOrder.payment_notes) || '—'}
+                      </p>
+                    </div>
+                  </div>
+                  {activeOrder.payment_notes ? (
+                    <div className="mt-3 rounded-xl border border-gray-100 bg-gray-50 p-3">
+                      <p className="text-xs uppercase text-aa-gray">Payment Notes</p>
+                      <p className="mt-1 text-sm text-aa-text-dark whitespace-pre-wrap break-words">
+                        {activeOrder.payment_notes}
+                      </p>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="rounded-2xl border border-gray-200 p-4">
@@ -829,8 +1117,8 @@ export default function OrdersPage() {
                 <div className="rounded-2xl border border-gray-200 p-4">
                   <p className="text-sm font-semibold text-aa-text-dark mb-3">Quick Actions</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Button variant="outline" onClick={() => updateOrder(activeOrder.id, { payment_status: 'paid' })}>
-                      Mark paid
+                    <Button variant="outline" onClick={() => updateOrder(activeOrder.id, { payment_status: 'pending' })}>
+                      Keep pending
                     </Button>
                     <Button variant="outline" onClick={() => updateOrder(activeOrder.id, { fulfillment_status: 'packed' })}>
                       Mark packed
@@ -841,7 +1129,63 @@ export default function OrdersPage() {
                     <Button variant="outline" onClick={() => updateOrder(activeOrder.id, { status: 'cancelled' })}>
                       Cancel
                     </Button>
+                    <Button
+                      variant="primary"
+                      onClick={sendRemainingPaymentLink}
+                      disabled={
+                        sendingPaymentLink ||
+                        schedulingPaymentLink ||
+                        getPaymentDue(activeOrder) <= 0 ||
+                        !String(activeOrder.customer_phone || '').trim()
+                      }
+                      className="sm:col-span-2"
+                    >
+                      {sendingPaymentLink ? 'Sending payment link...' : 'Send Remaining Payment Link'}
+                    </Button>
                   </div>
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <input
+                      type="datetime-local"
+                      value={paymentLinkScheduleAt}
+                      onChange={(event) => setPaymentLinkScheduleAt(event.target.value)}
+                      className="sm:col-span-2 rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="number"
+                      min="1"
+                      max="10080"
+                      step="1"
+                      value={paymentLinkTimerMinutes}
+                      onChange={(event) => setPaymentLinkTimerMinutes(event.target.value)}
+                      placeholder="Timer (mins)"
+                      className="rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={scheduleRemainingPaymentLink}
+                      disabled={
+                        sendingPaymentLink ||
+                        schedulingPaymentLink ||
+                        getPaymentDue(activeOrder) <= 0 ||
+                        !String(activeOrder.customer_phone || '').trim() ||
+                        (!paymentLinkScheduleAt && !paymentLinkTimerMinutes)
+                      }
+                    >
+                      {schedulingPaymentLink ? 'Scheduling...' : 'Schedule Link'}
+                    </Button>
+                  </div>
+                  <p className="mt-3 text-xs text-aa-gray">
+                    Send now or schedule auto-send for the due amount on WhatsApp using date/time or timer minutes.
+                  </p>
+                  {paymentLinkFeedback.text ? (
+                    <p
+                      className={`mt-2 text-xs ${
+                        paymentLinkFeedback.type === 'error' ? 'text-red-600' : 'text-green-700'
+                      }`}
+                    >
+                      {paymentLinkFeedback.text}
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
