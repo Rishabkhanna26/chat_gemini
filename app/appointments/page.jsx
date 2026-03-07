@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
@@ -81,6 +81,7 @@ export default function AppointmentsPage() {
     payment_notes: '',
     payment_services: [],
   });
+  const appointmentsRefreshInFlightRef = useRef(false);
 
   const hasAppointmentsAccess = Boolean(user?.id) && hasAppointmentAccess(user);
   const canUseServiceAppointments = Boolean(user?.id) && hasServiceAccess(user);
@@ -218,15 +219,27 @@ export default function AppointmentsPage() {
     }
   };
 
-  async function fetchAppointments({ reset = false, nextOffset = 0, searchTerm = '', status = 'all' } = {}) {
-    if (reset) {
-      setLoading(true);
-    } else {
-      setLoadingMore(true);
+  async function fetchAppointments({
+    reset = false,
+    nextOffset = 0,
+    searchTerm = '',
+    status = 'all',
+    silent = false,
+    limit = null,
+  } = {}) {
+    if (appointmentsRefreshInFlightRef.current) return;
+    appointmentsRefreshInFlightRef.current = true;
+    if (!silent) {
+      if (reset) {
+        setLoading(true);
+      } else {
+        setLoadingMore(true);
+      }
     }
     try {
       const params = new URLSearchParams();
-      params.set('limit', '50');
+      const nextLimit = Math.min(500, Math.max(Number(limit) || 0, 50));
+      params.set('limit', String(nextLimit));
       params.set('offset', String(nextOffset));
       if (searchTerm) params.set('q', searchTerm);
       if (status && status !== 'all') params.set('status', status);
@@ -243,16 +256,68 @@ export default function AppointmentsPage() {
       }
     } catch (error) {
       console.error('Failed to fetch appointments:', error);
-      if (reset) {
+      if (reset && !silent) {
         setAppointments([]);
         setHasMore(false);
         setOffset(0);
       }
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
+      if (!silent) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+      appointmentsRefreshInFlightRef.current = false;
     }
   }
+
+  useEffect(() => {
+    if (!hasAppointmentsAccess || !user?.id) return undefined;
+
+    const refreshAppointments = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      if (editOpen || editSaving || updatingId || loadingMore || creatingContact) {
+        return;
+      }
+      const liveLimit = Math.min(500, Math.max(appointments.length, 50));
+      fetchAppointments({
+        reset: true,
+        nextOffset: 0,
+        searchTerm: search,
+        status: filterStatus,
+        silent: true,
+        limit: liveLimit,
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshAppointments();
+      }
+    };
+
+    const intervalId = window.setInterval(refreshAppointments, 10000);
+    window.addEventListener('focus', refreshAppointments);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshAppointments);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [
+    appointments.length,
+    creatingContact,
+    editOpen,
+    editSaving,
+    filterStatus,
+    hasAppointmentsAccess,
+    loadingMore,
+    search,
+    updatingId,
+    user?.id,
+  ]);
 
   async function updateStatus(appointmentId, status) {
     const previous = appointments;

@@ -38,6 +38,7 @@ import {
   buildCatalogAvailabilityReply,
   buildCatalogGreetingPreview,
   buildCatalogListReply,
+  buildCatalogPopularReply,
   buildCatalogPriceReply,
   collectCatalogComparableTerms,
   findCatalogItemByPrice,
@@ -349,7 +350,7 @@ const TRACK_ORDER_KEYWORDS = [
   "status",
   "delivery update",
 ];
-const YES_KEYWORDS = ["yes", "y", "haan", "ha", "ok", "okay", "confirm", "1"];
+const YES_KEYWORDS = ["yes", "y", "haan", "ha", "hanji", "haanji", "ok", "okay", "confirm", "1"];
 const NO_KEYWORDS = ["no", "n", "2", "other", "view other", "change"];
 const OWNER_MANAGER_URGENT_REASON_PROMPT =
   "Please tell me briefly what this urgent callback is regarding so I can inform the owner right away. You can also type *NO* if you do not want to share the reason.";
@@ -1188,6 +1189,31 @@ const CATALOG_PRICE_HIGH_HINTS = [
   "महंगा",
   "महंगी",
 ];
+const CATALOG_POPULAR_HINTS = [
+  "best",
+  "best product",
+  "best service",
+  "top",
+  "top product",
+  "top service",
+  "popular",
+  "most popular",
+  "recommended",
+  "recommend",
+  "suggest",
+  "sabse best",
+  "sabse acha",
+  "sabse accha",
+  "sabse achi",
+  "sabse acchi",
+  "sabse zyada bikne",
+  "sabse jyada bikne",
+  "sabse zyada order",
+  "sabse jyada order",
+  "most purchased",
+  "most bought",
+  "top selling",
+];
 const PRODUCT_SCOPE_HINTS = [
   "product",
   "products",
@@ -1490,6 +1516,29 @@ const detectCatalogRankingIntent = ({ input, catalog, fallbackScope = null }) =>
   };
 };
 
+const detectCatalogPopularityIntent = ({ input, catalog, fallbackScope = null }) => {
+  const normalized = normalizeComparableText(input);
+  if (!normalized) return null;
+  if (!textHasAny(normalized, CATALOG_POPULAR_HINTS)) return null;
+
+  const scope = resolveCatalogQueryScope({
+    input: normalized,
+    catalog,
+    fallbackScope,
+  });
+
+  if (scope === "product" || scope === "service") {
+    return { itemType: scope };
+  }
+  if (catalog?.products?.length) {
+    return { itemType: "product" };
+  }
+  if (catalog?.services?.length) {
+    return { itemType: "service" };
+  }
+  return null;
+};
+
 const detectCatalogListIntent = ({ input, catalog, fallbackScope = null }) => {
   const normalized = normalizeComparableText(input);
   if (!normalized) return null;
@@ -1536,6 +1585,9 @@ const isValidLightweightStepReply = ({ step, input, automation }) => {
       choiceNumber === "1" ||
       choiceNumber === "2" ||
       YES_KEYWORDS.includes(normalized) ||
+      normalized.includes("kar do") ||
+      normalized.includes("kardo") ||
+      normalized.includes("kr do") ||
       NO_KEYWORDS.includes(normalized) ||
       normalized.includes("yes") ||
       normalized.includes("other product") ||
@@ -1554,6 +1606,7 @@ const shouldBypassLightweightGuidedFlow = ({
   businessInfoIntent,
   isGreetingMessage,
   appointmentRescheduleIntent,
+  catalogPopularityIntent,
   catalogRankingIntent,
   catalogListIntent,
 }) => {
@@ -1562,9 +1615,10 @@ const shouldBypassLightweightGuidedFlow = ({
   if (isValidLightweightStepReply({ step, input: normalized, automation })) return false;
 
   return Boolean(
-    businessInfoIntent ||
+      businessInfoIntent ||
       isGreetingMessage ||
       appointmentRescheduleIntent ||
+      catalogPopularityIntent ||
       catalogRankingIntent ||
       catalogListIntent ||
       isClearlyOutOfScopeQuick(normalized, catalog) ||
@@ -2155,6 +2209,15 @@ const normalizeWhatsAppAuthMethod = (value) =>
 
 const sanitizePairingPhoneNumber = (value) => sanitizePhone(value, { min: 7, max: 15 });
 
+const getWhatsAppSessionAuthPath = (adminId) =>
+  `${AUTH_DATA_PATH}/session-admin-${Number(adminId)}`;
+
+const hasSavedWhatsAppSession = (adminId) => {
+  const normalizedAdminId = Number(adminId);
+  if (!Number.isFinite(normalizedAdminId) || normalizedAdminId <= 0) return false;
+  return existsSync(getWhatsAppSessionAuthPath(normalizedAdminId));
+};
+
 const buildInitialSessionState = (options = {}) => ({
   isReady: false,
   hasStarted: false,
@@ -2197,18 +2260,63 @@ const createClient = (adminId, options = {}) => {
   });
 };
 
-const buildStateResponse = (session) => ({
-  status: session.state.status,
-  ready: session.state.isReady,
-  authMethod: session.state.authMethod,
-  qrImage: session.state.latestQrImage,
-  pairingCode: session.state.latestPairingCode,
-  pairingCodeExpiresAt: session.state.pairingCodeExpiresAt,
-  pairingPhoneNumber: session.state.pairingPhoneNumber,
-  activeAdminId: session.adminId,
-  activeAdminNumber: session.state.activeAdminNumber,
-  activeAdminName: session.state.activeAdminName,
-});
+const buildStateResponse = (session) => {
+  const hasSavedSession = hasSavedWhatsAppSession(session?.adminId);
+  const status = session?.state?.status || "disconnected";
+  const canReconnect =
+    hasSavedSession &&
+    status !== "connected" &&
+    !["starting", "qr", "code"].includes(status);
+
+  return {
+    status,
+    ready: Boolean(session?.state?.isReady),
+    authMethod: session?.state?.authMethod || null,
+    qrImage: session?.state?.latestQrImage || null,
+    pairingCode: session?.state?.latestPairingCode || null,
+    pairingCodeExpiresAt: session?.state?.pairingCodeExpiresAt || null,
+    pairingPhoneNumber: session?.state?.pairingPhoneNumber || null,
+    activeAdminId: session?.adminId ?? null,
+    activeAdminNumber: session?.state?.activeAdminNumber || null,
+    activeAdminName: session?.state?.activeAdminName || null,
+    hasSavedSession,
+    canReconnect,
+  };
+};
+
+const setSessionDisconnectedState = (session, status = "disconnected") => {
+  if (!session?.state) return;
+  session.state.hasStarted = false;
+  session.state.isReady = false;
+  session.state.latestQrImage = null;
+  session.state.latestPairingCode = null;
+  session.state.pairingCodeExpiresAt = null;
+  session.state.activeAdminNumber = null;
+  session.state.activeAdminName = null;
+  session.state.status = status;
+};
+
+const verifySessionHealth = async (session) => {
+  if (!session) return null;
+  if (!session.client || (!session.state?.isReady && session.state?.status !== "connected")) {
+    return buildStateResponse(session);
+  }
+
+  try {
+    const clientState = typeof session.client.getState === "function"
+      ? String((await session.client.getState()) || "").trim().toUpperCase()
+      : "CONNECTED";
+    if (clientState && clientState !== "CONNECTED") {
+      setSessionDisconnectedState(session, "disconnected");
+      emitStatus(session, "disconnected");
+    }
+  } catch (_error) {
+    setSessionDisconnectedState(session, "disconnected");
+    emitStatus(session, "disconnected");
+  }
+
+  return buildStateResponse(session);
+};
 
 const updateAdminWhatsAppDetails = async (session) => {
   if (!session?.adminId) return;
@@ -2289,25 +2397,13 @@ const attachClientEvents = (session) => {
   });
 
   client.on("disconnected", () => {
-    session.state.hasStarted = false;
-    session.state.isReady = false;
-    session.state.latestQrImage = null;
-    session.state.latestPairingCode = null;
-    session.state.pairingCodeExpiresAt = null;
-    session.state.activeAdminNumber = null;
-    session.state.activeAdminName = null;
+    setSessionDisconnectedState(session, "disconnected");
     emitStatus(session, "disconnected");
     console.log(`⚠️ WhatsApp disconnected (admin ${session.adminId})`);
   });
 
   client.on("auth_failure", () => {
-    session.state.hasStarted = false;
-    session.state.isReady = false;
-    session.state.latestQrImage = null;
-    session.state.latestPairingCode = null;
-    session.state.pairingCodeExpiresAt = null;
-    session.state.activeAdminNumber = null;
-    session.state.activeAdminName = null;
+    setSessionDisconnectedState(session, "auth_failure");
     emitStatus(session, "auth_failure");
     console.log(`❌ WhatsApp auth failure (admin ${session.adminId})`);
   });
@@ -2449,20 +2545,14 @@ export const stopWhatsApp = async (adminId) => {
       }
     });
     touchSession(session);
-    session.state.hasStarted = false;
-    session.state.isReady = false;
-    session.state.latestQrImage = null;
-    session.state.latestPairingCode = null;
-    session.state.pairingCodeExpiresAt = null;
-    session.state.activeAdminNumber = null;
-    session.state.activeAdminName = null;
+    setSessionDisconnectedState(session, "disconnected");
     emitStatus(session, "disconnected");
     sessions.delete(adminId);
   }
   return { ...buildStateResponse(session), alreadyStarted: true };
 };
 
-export const getWhatsAppState = (adminId) => {
+export const getWhatsAppState = async (adminId) => {
   if (!Number.isFinite(adminId)) {
     return {
       status: "idle",
@@ -2475,12 +2565,15 @@ export const getWhatsAppState = (adminId) => {
       activeAdminId: null,
       activeAdminNumber: null,
       activeAdminName: null,
+      hasSavedSession: false,
+      canReconnect: false,
     };
   }
   const session = sessions.get(adminId);
   if (!session) {
+    const hasSavedSession = hasSavedWhatsAppSession(adminId);
     return {
-      status: "idle",
+      status: "disconnected",
       ready: false,
       authMethod: null,
       qrImage: null,
@@ -2490,9 +2583,11 @@ export const getWhatsAppState = (adminId) => {
       activeAdminId: adminId,
       activeAdminNumber: null,
       activeAdminName: null,
+      hasSavedSession,
+      canReconnect: hasSavedSession,
     };
   }
-  return buildStateResponse(session);
+  return verifySessionHealth(session);
 };
 
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -4222,6 +4317,122 @@ const buildTrackingMessage = (orders) => {
   return lines.join("\n");
 };
 
+const findCatalogItemByIdOrName = ({ items = [], id = null, name = "" }) => {
+  const normalizedId = Number(id);
+  const normalizedName = normalizeComparableText(name);
+  if (Number.isFinite(normalizedId) && normalizedId > 0) {
+    const matchedById = items.find((item) => Number(item?.id) === normalizedId);
+    if (matchedById) return matchedById;
+  }
+  if (!normalizedName) return null;
+  return (
+    items.find((item) => normalizeComparableText(item?.name) === normalizedName) ||
+    items.find((item) => normalizedName.includes(normalizeComparableText(item?.name || ""))) ||
+    items.find((item) => normalizeComparableText(item?.name || "").includes(normalizedName)) ||
+    null
+  );
+};
+
+const getFallbackCatalogRecommendation = ({ catalog, itemType = "product" }) => {
+  const items = itemType === "service" ? catalog?.services || [] : catalog?.products || [];
+  return (
+    findCatalogItemByPrice({ catalog, itemType, direction: "highest" }) ||
+    items[0] ||
+    null
+  );
+};
+
+const getMostPopularCatalogItem = async ({ adminId, itemType = "product", catalog }) => {
+  const normalizedAdminId = Number(adminId);
+  const fallbackItem = getFallbackCatalogRecommendation({ catalog, itemType });
+  if (!Number.isFinite(normalizedAdminId) || normalizedAdminId <= 0) {
+    return { item: fallbackItem, source: fallbackItem ? "fallback" : "none" };
+  }
+
+  if (itemType === "service") {
+    const [rows] = await db.query(
+      `
+        SELECT
+          btrim(COALESCE(appointment_type, '')) AS item_name,
+          COUNT(*)::int AS total_bookings
+        FROM appointments
+        WHERE admin_id = ?
+          AND COALESCE(appointment_kind, 'service') = 'service'
+          AND COALESCE(status, 'booked') <> 'cancelled'
+          AND btrim(COALESCE(appointment_type, '')) <> ''
+        GROUP BY btrim(COALESCE(appointment_type, ''))
+        ORDER BY total_bookings DESC, item_name ASC
+        LIMIT 1
+      `,
+      [normalizedAdminId]
+    );
+    const topRow = rows?.[0] || null;
+    if (!topRow) {
+      return { item: fallbackItem, source: fallbackItem ? "fallback" : "none" };
+    }
+    return {
+      item:
+        findCatalogItemByIdOrName({
+          items: catalog?.services || [],
+          name: topRow.item_name,
+        }) || {
+          name: topRow.item_name,
+        },
+      source: "bookings",
+    };
+  }
+
+  const [rows] = await db.query(
+    `
+      WITH expanded AS (
+        SELECT
+          o.id AS order_id,
+          CASE
+            WHEN COALESCE(item.value->>'id', '') ~ '^\\d+$' THEN (item.value->>'id')::int
+            ELSE NULL
+          END AS catalog_id,
+          btrim(COALESCE(item.value->>'name', '')) AS item_name,
+          CASE
+            WHEN COALESCE(item.value->>'quantity', '') ~ '^-?\\d+(?:\\.\\d+)?$'
+              THEN GREATEST((item.value->>'quantity')::numeric, 0)
+            ELSE 0
+          END AS quantity_value
+        FROM orders o
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(o.items, '[]'::jsonb)) AS item(value)
+        WHERE o.admin_id = ?
+          AND COALESCE(o.status, 'new') <> 'cancelled'
+      )
+      SELECT
+        catalog_id,
+        item_name,
+        COALESCE(SUM(quantity_value), 0)::numeric(12,2) AS total_quantity,
+        COUNT(DISTINCT order_id)::int AS total_orders
+      FROM expanded
+      WHERE item_name <> ''
+      GROUP BY catalog_id, item_name
+      ORDER BY total_quantity DESC, total_orders DESC, item_name ASC
+      LIMIT 1
+    `,
+    [normalizedAdminId]
+  );
+  const topRow = rows?.[0] || null;
+  if (!topRow) {
+    return { item: fallbackItem, source: fallbackItem ? "fallback" : "none" };
+  }
+
+  return {
+    item:
+      findCatalogItemByIdOrName({
+        items: catalog?.products || [],
+        id: topRow.catalog_id,
+        name: topRow.item_name,
+      }) || {
+        name: topRow.item_name,
+      },
+    source: "sales",
+  };
+};
+
 const buildRazorpayReferenceId = ({ adminId, phone }) => {
   const adminPart = Number.isFinite(Number(adminId)) ? String(Number(adminId)) : "0";
   const phonePart = String(phone || "").replace(/\D/g, "").slice(-6) || "na";
@@ -4889,6 +5100,11 @@ const handleIncomingMessage = async ({
     const isGreetingMessage = isAiGreetingTriggerMessage(messageText);
     const appointmentRescheduleIntent = isAppointmentRescheduleRequest(normalizedMessage);
     const catalogContextScope = resolveCatalogContextScope(user);
+    const catalogPopularityIntent = detectCatalogPopularityIntent({
+      input: normalizedMessage,
+      catalog,
+      fallbackScope: catalogContextScope,
+    });
     const catalogRankingIntent = detectCatalogRankingIntent({
       input: normalizedMessage,
       catalog,
@@ -4907,6 +5123,7 @@ const handleIncomingMessage = async ({
       businessInfoIntent,
       isGreetingMessage,
       appointmentRescheduleIntent,
+      catalogPopularityIntent,
       catalogRankingIntent,
       catalogListIntent,
     });
@@ -5105,6 +5322,25 @@ const handleIncomingMessage = async ({
       appendAiConversationHistory(user, "user", messageText);
       appendAiConversationHistory(user, "assistant", rankedReply);
       await sendMessage(rankedReply);
+      trackLeadCaptureActivity({ user, messageText, phone, assignedAdminId });
+      return;
+    }
+
+    if (!hasActiveGuidedFlow && catalogPopularityIntent) {
+      const popularItem = await getMostPopularCatalogItem({
+        adminId: assignedAdminId,
+        itemType: catalogPopularityIntent.itemType,
+        catalog,
+      });
+      const popularReply = buildCatalogPopularReply({
+        item: popularItem?.item,
+        itemType: catalogPopularityIntent.itemType,
+        languageCode: responseLanguage?.code || "en",
+        source: popularItem?.source || "fallback",
+      });
+      appendAiConversationHistory(user, "user", messageText);
+      appendAiConversationHistory(user, "assistant", popularReply);
+      await sendMessage(popularReply);
       trackLeadCaptureActivity({ user, messageText, phone, assignedAdminId });
       return;
     }
@@ -6001,11 +6237,16 @@ const handleIncomingMessage = async ({
        =============================== */
     if (user.step === "PRODUCT_CONFIRM_SELECTION") {
       const choiceNumber = extractNumber(lower);
-      if (
+      const wantsConfirmSelection =
         choiceNumber === "1" ||
         YES_KEYWORDS.includes(lower) ||
         lower.includes("yes") ||
-        hasCatalogOrderIntent(lower)
+        lower.includes("kar do") ||
+        lower.includes("kardo") ||
+        lower.includes("kr do") ||
+        hasCatalogOrderIntent(lower);
+      if (
+        wantsConfirmSelection
       ) {
         await delay(500);
         await sendMessage("How many would you like to order?\n(Example: 1, 2, 3)");

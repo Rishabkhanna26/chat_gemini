@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
@@ -248,15 +248,38 @@ export default function OrdersPage() {
   const [paymentLinkScheduleAt, setPaymentLinkScheduleAt] = useState('');
   const [paymentLinkTimerMinutes, setPaymentLinkTimerMinutes] = useState('');
   const [deletingOrderId, setDeletingOrderId] = useState(null);
+  const ordersRefreshInFlightRef = useRef(false);
 
   const hasOrderAccess = Boolean(user?.id) && hasProductAccess(user);
 
-  const fetchOrders = async () => {
+  const syncOrdersState = (nextOrders) => {
+    setOrders(nextOrders);
+    setSelectedIds((prev) => {
+      if (!(prev instanceof Set) || prev.size === 0) return prev;
+      const availableIds = new Set(nextOrders.map((order) => order.id));
+      const filtered = [...prev].filter((id) => availableIds.has(id));
+      if (filtered.length === prev.size) return prev;
+      return new Set(filtered);
+    });
+    setActiveOrder((prev) => {
+      if (!prev?.id) return prev;
+      return nextOrders.find((order) => order.id === prev.id) || null;
+    });
+  };
+
+  const fetchOrders = async ({ silent = false, limit = null } = {}) => {
     if (!user?.id) return;
-    setLoading(true);
-    setError('');
+    if (ordersRefreshInFlightRef.current) return;
+    ordersRefreshInFlightRef.current = true;
+    if (!silent) {
+      setLoading(true);
+      setError('');
+    }
     try {
-      const response = await fetch('/api/orders?limit=200', { credentials: 'include' });
+      const params = new URLSearchParams();
+      const nextLimit = Math.min(500, Math.max(Number(limit) || 0, 200));
+      params.set('limit', String(nextLimit));
+      const response = await fetch(`/api/orders?${params.toString()}`, { credentials: 'include' });
       const contentType = response.headers.get('content-type') || '';
       if (!response.ok) {
         const message = contentType.includes('application/json')
@@ -265,13 +288,21 @@ export default function OrdersPage() {
         throw new Error(message || 'Could not load orders.');
       }
       const data = contentType.includes('application/json') ? await response.json() : {};
-      setOrders(Array.isArray(data?.data) ? data.data : []);
+      syncOrdersState(Array.isArray(data?.data) ? data.data : []);
+      setError('');
       setSyncWarning('');
     } catch (err) {
-      setOrders([]);
-      setError(err.message || 'Could not load orders right now.');
+      if (!silent) {
+        setOrders([]);
+        setActiveOrder(null);
+        setSelectedIds(new Set());
+        setError(err.message || 'Could not load orders right now.');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
+      ordersRefreshInFlightRef.current = false;
     }
   };
 
@@ -280,6 +311,45 @@ export default function OrdersPage() {
     if (!hasOrderAccess) return;
     fetchOrders();
   }, [authLoading, hasOrderAccess, user?.id]);
+
+  useEffect(() => {
+    if (authLoading || !hasOrderAccess || !user?.id) return undefined;
+
+    const refreshOrders = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      if (deletingOrderId || sendingPaymentLink || schedulingPaymentLink) {
+        return;
+      }
+      const liveLimit = Math.min(500, Math.max(orders.length, 200));
+      fetchOrders({ silent: true, limit: liveLimit });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOrders();
+      }
+    };
+
+    const intervalId = window.setInterval(refreshOrders, 10000);
+    window.addEventListener('focus', refreshOrders);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshOrders);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [
+    authLoading,
+    deletingOrderId,
+    hasOrderAccess,
+    orders.length,
+    schedulingPaymentLink,
+    sendingPaymentLink,
+    user?.id,
+  ]);
 
   useEffect(() => {
     setNoteDraft('');

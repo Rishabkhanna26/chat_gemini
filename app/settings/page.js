@@ -61,6 +61,7 @@ export default function SettingsPage() {
   const [accentColor, setAccentColor] = useState(DEFAULT_ACCENT_COLOR);
   const [theme, setTheme] = useState(DEFAULT_THEME);
   const [whatsappConnected, setWhatsappConnected] = useState(false);
+  const [whatsappCanReconnect, setWhatsappCanReconnect] = useState(false);
   const [whatsappStatus, setWhatsappStatus] = useState('idle');
   const [whatsappQr, setWhatsappQr] = useState('');
   const [whatsappPairingCode, setWhatsappPairingCode] = useState('');
@@ -96,6 +97,60 @@ export default function SettingsPage() {
   const normalizePairingPhone = useCallback((value) => {
     return String(value || '').replace(/\D/g, '').slice(0, 15);
   }, []);
+
+  const markWhatsappDisconnectedUi = useCallback(({ allowReconnect = true } = {}) => {
+    setWhatsappStatus('disconnected');
+    setWhatsappConnected(false);
+    if (!allowReconnect) {
+      setWhatsappCanReconnect(false);
+    }
+    updateWhatsappQr('');
+    setWhatsappPairingCode('');
+  }, [updateWhatsappQr]);
+
+  const applyWhatsappStatusPayload = useCallback((payload = {}) => {
+    const nextStatus = String(payload?.status || 'disconnected');
+    const isCurrentAdmin =
+      !payload?.activeAdminId || !user?.id || payload.activeAdminId === user.id;
+    let derivedStatus =
+      nextStatus === 'connected' && !isCurrentAdmin
+        ? 'connected_other'
+        : nextStatus;
+    const isConnected = derivedStatus === 'connected' && Boolean(payload?.ready);
+    if (!isConnected && derivedStatus === 'connected') {
+      derivedStatus = 'disconnected';
+    }
+    const canReconnect = Boolean(payload?.canReconnect);
+
+    setWhatsappStatus(derivedStatus);
+    setWhatsappConnected(isConnected);
+    setWhatsappCanReconnect(canReconnect);
+
+    if (isConnected) {
+      updateWhatsappQr('');
+      setWhatsappPairingCode('');
+      return;
+    }
+    if (payload?.pairingCode) {
+      updateWhatsappQr('');
+      setWhatsappPairingCode(String(payload.pairingCode));
+      if (payload?.pairingPhoneNumber) {
+        setWhatsappPairingPhoneInput(
+          normalizePairingPhone(payload.pairingPhoneNumber)
+        );
+      }
+      return;
+    }
+    if (payload?.qrImage) {
+      setWhatsappPairingCode('');
+      updateWhatsappQr(payload.qrImage);
+      return;
+    }
+    if (derivedStatus !== 'qr' && derivedStatus !== 'code') {
+      updateWhatsappQr('');
+      setWhatsappPairingCode('');
+    }
+  }, [normalizePairingPhone, updateWhatsappQr, user?.id]);
 
   const fetchWhatsAppApi = useCallback(async (path, options = {}, retry = true) => {
     const token = await getBackendJwt();
@@ -252,39 +307,14 @@ export default function SettingsPage() {
       }
       const payload = await response.json();
       if (!isMountedRef.current) return;
-      const nextStatus = payload?.status || 'idle';
-      const isCurrentAdmin =
-        payload?.activeAdminId && user?.id && payload.activeAdminId === user.id;
-      const derivedStatus =
-        nextStatus === 'connected' && !isCurrentAdmin
-          ? 'connected_other'
-          : nextStatus;
-      setWhatsappStatus(derivedStatus);
-      setWhatsappConnected(derivedStatus === 'connected');
-      if (derivedStatus === 'connected') {
-        updateWhatsappQr('');
-        setWhatsappPairingCode('');
-      } else if (payload?.pairingCode) {
-        updateWhatsappQr('');
-        setWhatsappPairingCode(String(payload.pairingCode));
-        if (payload?.pairingPhoneNumber) {
-          setWhatsappPairingPhoneInput(
-            normalizePairingPhone(payload.pairingPhoneNumber)
-          );
-        }
-      } else if (payload?.qrImage) {
-        setWhatsappPairingCode('');
-        updateWhatsappQr(payload.qrImage);
-      } else if (derivedStatus !== 'qr' && derivedStatus !== 'code') {
-        updateWhatsappQr('');
-        setWhatsappPairingCode('');
-      }
+      applyWhatsappStatusPayload(payload);
     } catch (error) {
       if (isMountedRef.current) {
+        markWhatsappDisconnectedUi();
         setWhatsappActionStatus('Could not load WhatsApp status.');
       }
     }
-  }, [fetchWhatsAppApi, normalizePairingPhone, updateWhatsappQr, user?.id]);
+  }, [applyWhatsappStatusPayload, fetchWhatsAppApi, markWhatsappDisconnectedUi, user?.id]);
 
   useEffect(() => {
     const isMountedRef = { current: true };
@@ -296,6 +326,13 @@ export default function SettingsPage() {
       };
     }
     fetchWhatsAppStatus(isMountedRef);
+    const pollTimer = setInterval(() => {
+      fetchWhatsAppStatus(isMountedRef);
+    }, 15000);
+    const handleFocus = () => {
+      fetchWhatsAppStatus(isMountedRef);
+    };
+    window.addEventListener('focus', handleFocus);
 
     (async () => {
       try {
@@ -307,33 +344,7 @@ export default function SettingsPage() {
         });
 
         socket.on('whatsapp:status', (payload) => {
-          const nextStatus = payload?.status || 'idle';
-          const isCurrentAdmin =
-            payload?.activeAdminId && user?.id && payload.activeAdminId === user.id;
-          const derivedStatus =
-            nextStatus === 'connected' && !isCurrentAdmin
-              ? 'connected_other'
-              : nextStatus;
-          setWhatsappStatus(derivedStatus);
-          setWhatsappConnected(derivedStatus === 'connected');
-          if (derivedStatus === 'connected') {
-            updateWhatsappQr('');
-            setWhatsappPairingCode('');
-          } else if (payload?.pairingCode) {
-            updateWhatsappQr('');
-            setWhatsappPairingCode(String(payload.pairingCode));
-            if (payload?.pairingPhoneNumber) {
-              setWhatsappPairingPhoneInput(
-                normalizePairingPhone(payload.pairingPhoneNumber)
-              );
-            }
-          } else if (payload?.qrImage) {
-            setWhatsappPairingCode('');
-            updateWhatsappQr(payload.qrImage);
-          } else if (derivedStatus !== 'qr' && derivedStatus !== 'code') {
-            updateWhatsappQr('');
-            setWhatsappPairingCode('');
-          }
+          applyWhatsappStatusPayload(payload);
         });
 
         socket.on('whatsapp:qr', (payload) => {
@@ -369,23 +380,35 @@ export default function SettingsPage() {
           if (incomingPhone) {
             setWhatsappPairingPhoneInput(incomingPhone);
           }
+          setWhatsappCanReconnect(false);
         });
 
         socket.on('connect_error', () => {
+          markWhatsappDisconnectedUi();
+          setWhatsappActionStatus('Could not connect to WhatsApp.');
+        });
+
+        socket.on('disconnect', () => {
+          markWhatsappDisconnectedUi();
           setWhatsappActionStatus('Could not connect to WhatsApp.');
         });
       } catch (error) {
         if (!isMountedRef.current) return;
+        markWhatsappDisconnectedUi();
         setWhatsappActionStatus('Could not connect to WhatsApp.');
       }
     })();
 
     return () => {
       isMountedRef.current = false;
+      clearInterval(pollTimer);
+      window.removeEventListener('focus', handleFocus);
       if (socket) socket.disconnect();
     };
   }, [
+    applyWhatsappStatusPayload,
     fetchWhatsAppStatus,
+    markWhatsappDisconnectedUi,
     normalizePairingPhone,
     renderQrFromRaw,
     updateWhatsappQr,
@@ -463,13 +486,19 @@ export default function SettingsPage() {
     whatsappStatus === 'starting' ||
     whatsappStatus === 'qr' ||
     whatsappStatus === 'code';
+  const showReconnectAction =
+    whatsappStatus === 'disconnected' &&
+    !whatsappConnected &&
+    whatsappCanReconnect;
+  const showFreshConnectActions =
+    whatsappStatus === 'disconnected' &&
+    !whatsappConnected &&
+    !whatsappCanReconnect;
   const isStartBlocked =
     whatsappConnected ||
     whatsappStatus === 'connected_other' ||
-    whatsappStatus === 'starting';
-  const canDisconnect = Boolean(
-    whatsappStatus && !['idle', 'disconnected'].includes(whatsappStatus)
-  );
+    isWhatsappPending;
+  const showDisconnectAction = Boolean(whatsappConnected || isWhatsappPending);
   const whatsappTone = whatsappConnected ? 'green' : isWhatsappPending ? 'amber' : 'red';
   const whatsappStatusLabel = whatsappConnected
     ? 'Connected'
@@ -481,8 +510,6 @@ export default function SettingsPage() {
     ? 'Waiting for QR Scan'
     : whatsappStatus === 'code'
     ? 'Waiting for Link Code Confirm'
-    : whatsappStatus === 'auth_failure'
-    ? 'Login Failed'
     : 'Disconnected';
   const whatsappStatusMessage = whatsappConnected
     ? 'WhatsApp is connected for this admin.'
@@ -494,8 +521,8 @@ export default function SettingsPage() {
     ? 'Scan the QR code below with WhatsApp to connect.'
     : whatsappStatus === 'code'
     ? 'Use the code below in WhatsApp > Linked Devices > Link with phone number.'
-    : whatsappStatus === 'auth_failure'
-    ? 'Login failed. Please connect again.'
+    : showReconnectAction
+    ? 'Saved WhatsApp login was found for this admin. Click Reconnect to restore the connection.'
     : 'WhatsApp is not connected right now.';
 
   return (
@@ -510,7 +537,15 @@ export default function SettingsPage() {
             <p className="text-aa-gray mt-2">Manage your account and preferences from one place.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={whatsappConnected ? 'green' : 'yellow'}>
+            <Badge
+              variant={
+                whatsappTone === 'green'
+                  ? 'green'
+                  : whatsappTone === 'amber'
+                  ? 'yellow'
+                  : 'red'
+              }
+            >
               WhatsApp: {whatsappStatusLabel}
             </Badge>
             <Badge variant="blue">Current: {activeTabMeta.name}</Badge>
@@ -1041,34 +1076,45 @@ export default function SettingsPage() {
                       </span>
                     </div>
                     <div className="flex flex-col gap-2 sm:flex-row">
-                      <Button
-                        variant="primary"
-                        onClick={() => handleStartWhatsApp({ usePairingCode: false })}
-                        disabled={isStartBlocked}
-                        className="w-full sm:w-auto"
-                      >
-                        {whatsappConnected
-                          ? 'Connected'
-                          : whatsappStatus === 'starting'
-                          ? 'Starting...'
-                          : 'Connect with QR'}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => handleStartWhatsApp({ usePairingCode: true })}
-                        disabled={isStartBlocked}
-                        className="w-full sm:w-auto"
-                      >
-                        Get Link Code
-                      </Button>
-                      <Button
-                        variant="outline"
-                        className="w-full border-red-600 text-red-600 hover:bg-red-50 sm:w-auto"
-                        onClick={handleDisconnectWhatsApp}
-                        disabled={!canDisconnect}
-                      >
-                        Disconnect
-                      </Button>
+                      {showReconnectAction ? (
+                        <Button
+                          variant="primary"
+                          onClick={() => handleStartWhatsApp({ usePairingCode: false })}
+                          disabled={isStartBlocked}
+                          className="w-full sm:w-auto"
+                        >
+                          Reconnect
+                        </Button>
+                      ) : null}
+                      {showFreshConnectActions ? (
+                        <Button
+                          variant="primary"
+                          onClick={() => handleStartWhatsApp({ usePairingCode: false })}
+                          disabled={isStartBlocked}
+                          className="w-full sm:w-auto"
+                        >
+                          {whatsappStatus === 'starting' ? 'Starting...' : 'Connect with QR'}
+                        </Button>
+                      ) : null}
+                      {showFreshConnectActions ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => handleStartWhatsApp({ usePairingCode: true })}
+                          disabled={isStartBlocked}
+                          className="w-full sm:w-auto"
+                        >
+                          Get Link Code
+                        </Button>
+                      ) : null}
+                      {showDisconnectAction ? (
+                        <Button
+                          variant="outline"
+                          className="w-full border-red-600 text-red-600 hover:bg-red-50 sm:w-auto"
+                          onClick={handleDisconnectWhatsApp}
+                        >
+                          Disconnect
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                   <p

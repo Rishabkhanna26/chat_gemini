@@ -431,6 +431,76 @@ export const buildCatalogPriceReply = ({
   return lines.join("\n");
 };
 
+export const buildCatalogPopularReply = ({
+  item,
+  itemType = "product",
+  languageCode = "en",
+  source = "sales",
+} = {}) => {
+  const language = ["hi", "hinglish"].includes(languageCode) ? languageCode : "en";
+  const scopeLabel = itemType === "service" ? "service" : "product";
+  const name = sanitizeText(item?.name || item?.label, 120);
+  const priceLabel = normalizePriceLabelInr(item?.price_label);
+  const durationLabel = formatCatalogDuration(item);
+  const packLabel = formatCatalogPack(item);
+  const description = sanitizeText(item?.description, 220);
+  const basedOnHistory = source === "sales" || source === "bookings";
+
+  if (!name) {
+    if (language === "hi") {
+      return `माफ कीजिए, अभी मैं कोई recommended ${scopeLabel} नहीं चुन पा रहा हूँ।`;
+    }
+    if (language === "hinglish") {
+      return `Sorry, abhi main koi recommended ${scopeLabel} pick nahin kar pa raha hoon.`;
+    }
+    return `Sorry, I couldn't choose a recommended ${scopeLabel} right now.`;
+  }
+
+  const lines = [];
+  if (basedOnHistory) {
+    if (language === "hi") {
+      lines.push(
+        `जी हां, हमारा सबसे popular ${scopeLabel} *${name}* है। यह अभी तक सबसे ज्यादा ${
+          itemType === "service" ? "book" : "order"
+        } हुआ है।`
+      );
+    } else if (language === "hinglish") {
+      lines.push(
+        `Ji haan, hamara sabse popular ${scopeLabel} *${name}* hai. Yeh ab tak sabse zyada ${
+          itemType === "service" ? "book" : "order"
+        } hua hai.`
+      );
+    } else {
+      lines.push(
+        `Our most popular ${scopeLabel} right now is *${name}*. It has been ${
+          itemType === "service" ? "booked" : "ordered"
+        } the most so far.`
+      );
+    }
+  } else if (language === "hi") {
+    lines.push(`जी हां, recommendation के हिसाब से *${name}* हमारा suggested ${scopeLabel} है।`);
+  } else if (language === "hinglish") {
+    lines.push(`Ji haan, recommendation ke hisaab se *${name}* hamara suggested ${scopeLabel} hai.`);
+  } else {
+    lines.push(`If you want my recommendation, *${name}* is a strong ${scopeLabel} choice.`);
+  }
+
+  if (priceLabel) lines.push(`*Price:* ${priceLabel}`);
+  if (itemType === "product" && packLabel) lines.push(`*Pack:* ${packLabel}`);
+  if (itemType === "service" && durationLabel) lines.push(`*Duration:* ${durationLabel}`);
+  if (description) lines.push(`*Details:* ${description}`);
+
+  if (language === "hi") {
+    lines.push("अगर आप चाहें तो मैं इसकी details share कर सकता हूँ या order में help कर सकता हूँ।");
+  } else if (language === "hinglish") {
+    lines.push("Agar aap chahen to main iski details share kar sakta hoon ya order mein help kar sakta hoon.");
+  } else {
+    lines.push("If you want, I can share more details or help you order it.");
+  }
+
+  return lines.join("\n");
+};
+
 export const buildCatalogAvailabilityReply = ({
   requestedName = "",
   matchedItem = null,

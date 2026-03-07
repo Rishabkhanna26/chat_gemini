@@ -404,9 +404,9 @@ app.get("/health/storage", async (req, res) => {
 
 app.use("/whatsapp", requireBackendAuth, whatsappRateLimiter);
 
-app.get("/whatsapp/status", (req, res) => {
+app.get("/whatsapp/status", async (req, res) => {
   try {
-    const state = getWhatsAppState(getScopedAdminIdFromRequest(req));
+    const state = await getWhatsAppState(getScopedAdminIdFromRequest(req));
     res.json(state);
   } catch (err) {
     logger.error("Failed to get WhatsApp status", { error: err.message });
@@ -592,18 +592,18 @@ app.use((err, req, res, next) => {
   });
 });
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   const adminId = parseAdminId(socket.data?.adminId);
   if (adminId != null) {
     const room = `admin:${adminId}`;
     socket.join(room);
-    const state = getWhatsAppState(adminId);
+    const state = await getWhatsAppState(adminId);
     socket.emit("whatsapp:status", state);
     if (state.qrImage) {
       socket.emit("whatsapp:qr", { qrImage: state.qrImage });
     }
   } else {
-    socket.emit("whatsapp:status", getWhatsAppState());
+    socket.emit("whatsapp:status", await getWhatsAppState());
   }
 });
 

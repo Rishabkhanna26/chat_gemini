@@ -99,6 +99,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onClo
     : 'w-[85vw] max-w-[320px] lg:w-64';
   const translateClass = mobileOpen ? 'translate-x-0' : '-translate-x-full';
   const showLabels = !collapsed || mobileOpen;
+  const compactDesktop = collapsed && !mobileOpen;
 
   return (
     <aside
@@ -106,42 +107,58 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onClo
       data-testid="sidebar"
     >
       {/* Logo */}
-      <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="h-10 w-10 rounded-lg overflow-hidden bg-white/10 border border-white/15 flex items-center justify-center shrink-0">
-            <Image
-              src="/algoaura_logo.png"
-              alt="AlgoAura logo"
-              width={40}
-              height={40}
-              className="h-full w-full object-contain"
-              priority
-            />
-          </div>
-          {showLabels && <span className="text-white font-bold text-xl truncate">AlgoAura</span>}
-        </div>
-        {mobileOpen && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-white/70 hover:text-white p-1 lg:hidden"
-            aria-label="Close sidebar"
+      <div
+        className={
+          compactDesktop
+            ? 'border-b border-white/10 px-2 py-4'
+            : 'border-b border-white/10 px-4 py-4 sm:px-6 sm:py-6'
+        }
+      >
+        <div className={compactDesktop ? 'flex flex-col items-center gap-3' : 'flex items-center gap-3'}>
+          <div
+            className={
+              compactDesktop
+                ? 'flex w-full items-center justify-center'
+                : 'flex min-w-0 flex-1 items-center gap-3 pr-2'
+            }
           >
-            <FontAwesomeIcon icon={faXmark} style={{ fontSize: 20 }} />
-          </button>
-        )}
-        <button
-          onClick={onToggleCollapse}
-          className="text-white/70 hover:text-white p-1 hidden lg:inline-flex"
-          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          data-testid="sidebar-toggle"
-        >
-          {collapsed ? (
-            <FontAwesomeIcon icon={faChevronRight} style={{ fontSize: 20 }} />
-          ) : (
-            <FontAwesomeIcon icon={faChevronLeft} style={{ fontSize: 20 }} />
-          )}
-        </button>
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-white/10">
+              <Image
+                src="/algoaura_logo.png"
+                alt="AlgoAura logo"
+                width={40}
+                height={40}
+                className="h-full w-full object-contain"
+                priority
+              />
+            </div>
+            {showLabels && <span className="truncate text-xl font-bold text-white">AlgoAura</span>}
+          </div>
+          <div className={compactDesktop ? 'flex items-center justify-center' : 'flex shrink-0 items-center gap-2'}>
+            {mobileOpen && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-white/70 transition-colors hover:bg-white/10 hover:text-white lg:hidden"
+                aria-label="Close sidebar"
+              >
+                <FontAwesomeIcon icon={faXmark} style={{ fontSize: 20 }} />
+              </button>
+            )}
+            <button
+              onClick={onToggleCollapse}
+              className="hidden h-9 w-9 items-center justify-center rounded-xl text-white/70 transition-colors hover:bg-white/10 hover:text-white lg:inline-flex"
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              data-testid="sidebar-toggle"
+            >
+              {collapsed ? (
+                <FontAwesomeIcon icon={faChevronRight} style={{ fontSize: 20 }} />
+              ) : (
+                <FontAwesomeIcon icon={faChevronLeft} style={{ fontSize: 20 }} />
+              )}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Menu Items */}
