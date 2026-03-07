@@ -260,9 +260,14 @@ async function createSchema(client) {
         CHECK (admin_tier IN ('super_admin', 'client_admin')),
       status VARCHAR(20) NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'inactive')),
+      business_name VARCHAR(140),
       business_category VARCHAR(120),
       business_type VARCHAR(20) DEFAULT 'both'
         CHECK (business_type IN ('product', 'service', 'both')),
+      booking_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      business_address TEXT,
+      business_hours VARCHAR(160),
+      business_map_url TEXT,
       access_expires_at TIMESTAMPTZ,
       automation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
       whatsapp_number VARCHAR(20),
@@ -374,6 +379,8 @@ async function createSchema(client) {
       user_id INT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
       admin_id INT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
       appointment_type VARCHAR(100),
+      appointment_kind VARCHAR(20) NOT NULL DEFAULT 'service'
+        CHECK (appointment_kind IN ('service', 'booking')),
       start_time TIMESTAMPTZ NOT NULL,
       end_time TIMESTAMPTZ NOT NULL,
       status VARCHAR(20) NOT NULL DEFAULT 'booked'
@@ -419,6 +426,9 @@ async function createSchema(client) {
       payment_method VARCHAR(30),
       payment_currency VARCHAR(10) DEFAULT 'INR',
       payment_notes TEXT,
+      payment_transaction_id VARCHAR(120),
+      payment_gateway_payment_id VARCHAR(120),
+      payment_link_id VARCHAR(120),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       CONSTRAINT orders_payment_total_nonneg CHECK (payment_total IS NULL OR payment_total >= 0),
@@ -429,6 +439,9 @@ async function createSchema(client) {
     `CREATE INDEX IF NOT EXISTS orders_status_idx ON orders (status)`,
     `CREATE INDEX IF NOT EXISTS orders_fulfillment_idx ON orders (fulfillment_status)`,
     `CREATE INDEX IF NOT EXISTS orders_payment_status_idx ON orders (payment_status)`,
+    `ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_transaction_id VARCHAR(120)`,
+    `ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_gateway_payment_id VARCHAR(120)`,
+    `ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_link_id VARCHAR(120)`,
 
     `
     CREATE TABLE IF NOT EXISTS order_revenue (
@@ -535,6 +548,7 @@ async function createSchema(client) {
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       sort_order INT NOT NULL DEFAULT 0,
       is_bookable BOOLEAN NOT NULL DEFAULT FALSE,
+      is_booking_item BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -545,6 +559,9 @@ async function createSchema(client) {
     `CREATE INDEX IF NOT EXISTS catalog_items_admin_sort_idx ON catalog_items (admin_id, sort_order, name)`,
     `ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS duration_value NUMERIC(10,2)`,
     `ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS duration_unit VARCHAR(20)`,
+    `ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS is_booking_item BOOLEAN NOT NULL DEFAULT FALSE`,
+    `ALTER TABLE admins ADD COLUMN IF NOT EXISTS booking_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+    `ALTER TABLE appointments ADD COLUMN IF NOT EXISTS appointment_kind VARCHAR(20) NOT NULL DEFAULT 'service'`,
     `ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS quantity_value NUMERIC(10,3)`,
     `ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS quantity_unit VARCHAR(40)`,
     `UPDATE catalog_items

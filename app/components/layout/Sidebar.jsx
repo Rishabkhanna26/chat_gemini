@@ -14,6 +14,7 @@ import {
   faUserGroup,
   faGear,
   faCalendarCheck,
+  faHotel,
   faBoxOpen,
   faCartShopping,
   faWallet,
@@ -23,14 +24,20 @@ import {
 } from '@fortawesome/free-solid-svg-icons';
 import { useAuth } from '../auth/AuthProvider.jsx';
 import { filterMenuItems } from '../../../lib/access.js';
-import { getCatalogLabel, hasProductAccess, hasServiceAccess } from '../../../lib/business.js';
+import {
+  getCatalogLabel,
+  hasAppointmentAccess,
+  hasBookingAccess,
+  hasProductAccess,
+} from '../../../lib/business.js';
 
 export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onClose }) {
   const pathname = usePathname();
   const { user } = useAuth();
   const [inboxCount, setInboxCount] = useState(0);
 
-  const showAppointments = Boolean(user?.id) && hasServiceAccess(user);
+  const showAppointments = Boolean(user?.id) && hasAppointmentAccess(user);
+  const showBooking = Boolean(user?.id) && hasBookingAccess(user);
   const showOrders = Boolean(user?.id) && hasProductAccess(user);
   const catalogLabel = getCatalogLabel(user);
 
@@ -78,6 +85,7 @@ export default function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onClo
     ...(showOrders ? [{ name: 'Orders', icon: faCartShopping, path: '/orders' }] : []),
     ...(showOrders ? [{ name: 'Revenue', icon: faWallet, path: '/revenue' }] : []),
     ...(showAppointments ? [{ name: 'Appointments', icon: faCalendarCheck, path: '/appointments' }] : []),
+    ...(showBooking ? [{ name: 'Booking', icon: faHotel, path: '/booking' }] : []),
     { name: 'Reports', icon: faChartBar, path: '/reports' },
     { name: 'Admins', icon: faUserGroup, path: '/admins', roles: ['super_admin'] },
     { name: 'Settings', icon: faGear, path: '/settings' },

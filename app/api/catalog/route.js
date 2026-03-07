@@ -62,7 +62,14 @@ export async function GET(request) {
     }
     const type = parseType(searchParams);
 
-    const items = await getCatalogItems(user.id, { type, status, search, limit: limit + 1, offset });
+    const items = await getCatalogItems(user.id, {
+      type,
+      status,
+      search,
+      limit: limit + 1,
+      offset,
+      section: 'catalog',
+    });
     const hasMore = items.length > limit;
     const data = hasMore ? items.slice(0, limit) : items;
 
@@ -125,6 +132,8 @@ export async function POST(request) {
       is_active: parseBoolean(body?.is_active, true),
       sort_order: parseNumber(body?.sort_order, 0),
       is_bookable: itemType === 'service' ? parseBoolean(body?.is_bookable, false) : false,
+      is_booking_item: false,
+      is_time_based: itemType === 'service' ? parseBoolean(body?.is_time_based, false) : false,
     });
 
     return Response.json({ success: true, data: item });

@@ -6,6 +6,7 @@ import Badge from '../components/common/Badge.jsx';
 import Modal from '../components/common/Modal.jsx';
 import Input from '../components/common/Input.jsx';
 import Loader from '../components/common/Loader.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
@@ -28,7 +29,7 @@ import {
 } from '../../lib/business.js';
 
 const DEFAULT_SERVICE_PROMPT =
-  'Please share your service details (preferred date/time, requirements, and any specific concerns).';
+  'Please share your service details (requirements and any specific concerns).';
 const DEFAULT_PRODUCT_PROMPT =
   'Please share product details (variant/size, quantity, and any preferences).';
 const DURATION_UNIT_OPTIONS = [
@@ -55,6 +56,7 @@ const buildEmptyForm = (type = 'service') => ({
   is_active: true,
   sort_order: 0,
   is_bookable: false,
+  is_time_based: false,
 });
 
 const formatKeywords = (keywords) => {
@@ -126,6 +128,8 @@ export default function CatalogPage() {
   const canAddProducts = hasProductAccess(user);
   const canAddServices = hasServiceAccess(user);
   const catalogLabel = getCatalogLabel(user);
+  const isDurationEnabled =
+    form.item_type === 'service' && Boolean(form.is_time_based);
 
   const fetchItems = async ({ bustCache = false } = {}) => {
     setLoading(true);
@@ -160,6 +164,49 @@ export default function CatalogPage() {
     });
     return Array.from(unique).sort((a, b) => a.localeCompare(b));
   }, [items]);
+
+  const typeOptions = useMemo(() => {
+    const options = [{ value: 'all', label: 'All' }];
+    if (canAddServices) options.push({ value: 'service', label: 'Services' });
+    if (canAddProducts) options.push({ value: 'product', label: 'Products' });
+    return options;
+  }, [canAddProducts, canAddServices]);
+
+  const statusOptions = useMemo(
+    () => [
+      { value: 'all', label: 'All' },
+      { value: 'active', label: 'Active' },
+      { value: 'inactive', label: 'Inactive' },
+    ],
+    []
+  );
+
+  const categoryOptions = useMemo(
+    () => [{ value: 'all', label: 'All' }, ...categories.map((category) => ({ value: category, label: category }))],
+    [categories]
+  );
+
+  const durationUnitOptions = useMemo(
+    () => DURATION_UNIT_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+    []
+  );
+
+  const quantityUnitOptions = useMemo(
+    () =>
+      PRODUCT_QUANTITY_UNITS.map((unit) => ({
+        value: unit,
+        label: unit === 'custom' ? 'Custom' : unit,
+      })),
+    []
+  );
+
+  const serviceTimeTypeOptions = useMemo(
+    () => [
+      { value: 'time_based', label: 'Time-based (fixed duration)' },
+      { value: 'not_time_based', label: 'Not time-based (no time limit)' },
+    ],
+    []
+  );
 
   const filteredItems = useMemo(() => {
     const search = filters.search.trim().toLowerCase();
@@ -218,6 +265,7 @@ export default function CatalogPage() {
       is_active: Boolean(item.is_active),
       sort_order: item.sort_order ?? 0,
       is_bookable: Boolean(item.is_bookable),
+      is_time_based: Boolean(item.is_time_based),
     });
     setShowModal(true);
   };
@@ -240,10 +288,15 @@ export default function CatalogPage() {
       category: form.category.trim(),
       price_label: normalizePriceLabel(form.price_label),
       duration_value:
-        form.item_type === 'service' ? parseNumber(form.duration_value, null) : null,
-      duration_unit: form.item_type === 'service' ? form.duration_unit || 'minutes' : null,
+        form.item_type === 'service' && form.is_time_based
+          ? parseNumber(form.duration_value, null)
+          : null,
+      duration_unit:
+        form.item_type === 'service' && form.is_time_based
+          ? form.duration_unit || 'minutes'
+          : null,
       duration_minutes:
-        form.item_type === 'service'
+        form.item_type === 'service' && form.is_time_based
           ? (() => {
               const durationValue = parseNumber(form.duration_value, null);
               const factor = DURATION_UNIT_MINUTE_FACTORS[form.duration_unit] || 1;
@@ -265,6 +318,7 @@ export default function CatalogPage() {
       is_active: Boolean(form.is_active),
       sort_order: parseNumber(form.sort_order, 0),
       is_bookable: form.item_type === 'service' ? Boolean(form.is_bookable) : false,
+      is_time_based: form.item_type === 'service' ? Boolean(form.is_time_based) : false,
     };
 
     try {
@@ -343,6 +397,7 @@ export default function CatalogPage() {
           is_active: false,
           sort_order: item.sort_order ?? 0,
           is_bookable: Boolean(item.is_bookable),
+          is_time_based: Boolean(item.is_time_based),
         }),
       });
       const data = await response.json();
@@ -496,44 +551,31 @@ export default function CatalogPage() {
               icon={<FontAwesomeIcon icon={faMagnifyingGlass} />}
             />
           </div>
-          <div className="flex flex-wrap gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-aa-gray uppercase mb-1">Type</label>
-              <select
-                value={filters.type}
-                onChange={(event) => setFilters((prev) => ({ ...prev, type: event.target.value }))}
-                className="px-4 py-2 border-2 border-gray-200 rounded-lg text-sm"
-              >
-                <option value="all">All</option>
-                {canAddServices && <option value="service">Services</option>}
-                {canAddProducts && <option value="product">Products</option>}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-aa-gray uppercase mb-1">Status</label>
-              <select
-                value={filters.status}
-                onChange={(event) => setFilters((prev) => ({ ...prev, status: event.target.value }))}
-                className="px-4 py-2 border-2 border-gray-200 rounded-lg text-sm"
-              >
-                <option value="all">All</option>
-                <option value="active">Active</option>
-                <option value="inactive">Inactive</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-aa-gray uppercase mb-1">Category</label>
-              <select
-                value={filters.category}
-                onChange={(event) => setFilters((prev) => ({ ...prev, category: event.target.value }))}
-                className="px-4 py-2 border-2 border-gray-200 rounded-lg text-sm"
-              >
-                <option value="all">All</option>
-                {categories.map((category) => (
-                  <option key={category} value={category}>{category}</option>
-                ))}
-              </select>
-            </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <GeminiSelect
+              label="Type"
+              value={filters.type}
+              onChange={(value) => setFilters((prev) => ({ ...prev, type: value }))}
+              options={typeOptions}
+              size="sm"
+              variant="vibrant"
+            />
+            <GeminiSelect
+              label="Status"
+              value={filters.status}
+              onChange={(value) => setFilters((prev) => ({ ...prev, status: value }))}
+              options={statusOptions}
+              size="sm"
+              variant="warm"
+            />
+            <GeminiSelect
+              label="Category"
+              value={filters.category}
+              onChange={(value) => setFilters((prev) => ({ ...prev, category: value }))}
+              options={categoryOptions}
+              size="sm"
+              variant="warm"
+            />
           </div>
         </div>
       </Card>
@@ -580,6 +622,11 @@ export default function CatalogPage() {
                           </Badge>
                           {item.category && <Badge variant="default">{item.category}</Badge>}
                           {item.is_bookable && <Badge variant="yellow">Bookable</Badge>}
+                          {item.item_type === 'service' && (
+                            <Badge variant="default">
+                              {item.is_time_based ? 'Time-based' : 'No time limit'}
+                            </Badge>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -720,6 +767,7 @@ export default function CatalogPage() {
                           details_prompt: DEFAULT_SERVICE_PROMPT,
                           duration_value: prev.duration_value || '',
                           duration_unit: prev.duration_unit || 'minutes',
+                          is_time_based: prev.is_time_based || false,
                         }))
                       }
                       disabled={Boolean(editingItem) || !canAddServices}
@@ -740,6 +788,7 @@ export default function CatalogPage() {
                           details_prompt: DEFAULT_PRODUCT_PROMPT,
                           duration_value: '',
                           duration_unit: 'minutes',
+                          is_time_based: false,
                         }))
                       }
                       disabled={Boolean(editingItem) || !canAddProducts}
@@ -785,6 +834,7 @@ export default function CatalogPage() {
                     value={form.duration_value}
                     onChange={(event) => setForm((prev) => ({ ...prev, duration_value: event.target.value }))}
                     placeholder="e.g., 45"
+                    disabled={!isDurationEnabled}
                   />
                 ) : (
                   <div className="rounded-xl border border-dashed border-gray-200 bg-white p-4 text-sm text-aa-gray">
@@ -796,21 +846,19 @@ export default function CatalogPage() {
               {form.item_type === 'service' && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-semibold text-aa-text-dark mb-2">Duration Unit</label>
-                    <select
+                    <GeminiSelect
+                      label="Duration Unit"
                       value={form.duration_unit}
-                      onChange={(event) => setForm((prev) => ({ ...prev, duration_unit: event.target.value }))}
-                      className="w-full px-4 py-2.5 sm:py-3 text-sm sm:text-base border-2 border-gray-200 rounded-lg outline-none focus:border-aa-orange"
-                    >
-                      {DURATION_UNIT_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(value) => setForm((prev) => ({ ...prev, duration_unit: value }))}
+                      options={durationUnitOptions}
+                      disabled={!isDurationEnabled}
+                      variant="warm"
+                    />
                   </div>
                   <div className="rounded-xl border border-dashed border-gray-200 bg-white p-4 text-sm text-aa-gray">
-                    Set service duration to help scheduling and booking.
+                    {isDurationEnabled
+                      ? 'Set duration only if service has fixed time. Leave empty if time is flexible.'
+                      : 'Duration is disabled because this service is set to no time limit.'}
                   </div>
                 </div>
               )}
@@ -825,18 +873,13 @@ export default function CatalogPage() {
                     placeholder="e.g., 500"
                   />
                   <div>
-                    <label className="block text-sm font-semibold text-aa-text-dark mb-2">Pack / Qty Unit</label>
-                    <select
+                    <GeminiSelect
+                      label="Pack / Qty Unit"
                       value={form.quantity_unit}
-                      onChange={(event) => setForm((prev) => ({ ...prev, quantity_unit: event.target.value }))}
-                      className="w-full px-4 py-2.5 sm:py-3 text-sm sm:text-base border-2 border-gray-200 rounded-lg outline-none focus:border-aa-orange"
-                    >
-                      {PRODUCT_QUANTITY_UNITS.map((unit) => (
-                        <option key={unit} value={unit}>
-                          {unit === 'custom' ? 'Custom' : unit}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(value) => setForm((prev) => ({ ...prev, quantity_unit: value }))}
+                      options={quantityUnitOptions}
+                      variant="warm"
+                    />
                   </div>
                   {form.quantity_unit === 'custom' ? (
                     <Input
@@ -927,6 +970,30 @@ export default function CatalogPage() {
                   </div>
                 )}
 
+                {form.item_type === 'service' && (
+                  <div className="mt-4">
+                    <div>
+                      <p className="text-sm font-semibold text-aa-text-dark">Service Time Type</p>
+                      <p className="text-xs text-aa-gray">
+                        Choose whether this service has fixed duration or no time limit.
+                      </p>
+                    </div>
+                    <GeminiSelect
+                      label="Service Time Type"
+                      value={form.is_time_based ? 'time_based' : 'not_time_based'}
+                      onChange={(value) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          is_time_based: value === 'time_based',
+                        }))
+                      }
+                      options={serviceTimeTypeOptions}
+                      className="mt-2"
+                      variant="vibrant"
+                    />
+                  </div>
+                )}
+
                 <div className="mt-4">
                   <Input
                     label="Sort Order"
@@ -948,9 +1015,14 @@ export default function CatalogPage() {
                     <span className="text-aa-gray">{normalizePriceLabel(form.price_label) || 'Price label'}</span>
                   </div>
                   <p className="text-xs text-aa-gray">Category: {form.category || '—'}</p>
-                  {form.item_type === 'service' && form.duration_value && (
+                  {form.item_type === 'service' && form.is_time_based && form.duration_value && (
                     <p className="text-xs text-aa-gray">
                       Duration: {form.duration_value} {form.duration_unit}
+                    </p>
+                  )}
+                  {form.item_type === 'service' && (
+                    <p className="text-xs text-aa-gray">
+                      Service Time Type: {form.is_time_based ? 'Time-based (fixed duration)' : 'Not time-based (no time limit)'}
                     </p>
                   )}
                   {form.item_type === 'product' && form.quantity_value && (

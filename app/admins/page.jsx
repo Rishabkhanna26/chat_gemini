@@ -11,6 +11,7 @@ import Badge from '../components/common/Badge.jsx';
 import Loader from '../components/common/Loader.jsx';
 import Modal from '../components/common/Modal.jsx';
 import Input from '../components/common/Input.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 
 export default function AdminsPage() {
   const router = useRouter();
@@ -33,6 +34,7 @@ export default function AdminsPage() {
     status: 'active',
     business_category: '',
     business_type: 'both',
+    booking_enabled: false,
     access_duration_value: '',
     access_duration_unit: 'days',
     access_expires_at: null,
@@ -103,6 +105,7 @@ export default function AdminsPage() {
       status: admin.status || 'active',
       business_category: admin.business_category || '',
       business_type: admin.business_type || 'both',
+      booking_enabled: Boolean(admin.booking_enabled),
       access_duration_value: '',
       access_duration_unit: 'days',
       access_expires_at: admin.access_expires_at || null,
@@ -124,6 +127,7 @@ export default function AdminsPage() {
         status: editForm.status,
         business_category: editForm.business_category,
         business_type: editForm.business_type,
+        booking_enabled: Boolean(editForm.booking_enabled),
         access_duration_value:
           editForm.access_duration_value === ''
             ? (editForm.status === 'active' ? 0 : undefined)
@@ -295,6 +299,11 @@ export default function AdminsPage() {
                 <div className="text-sm text-aa-gray">
                   Business: {admin.business_category || 'General'} ({admin.business_type || 'both'})
                 </div>
+                <div className="flex flex-wrap gap-2">
+                  {(admin.admin_tier === 'super_admin' || admin.booking_enabled) && (
+                    <Badge variant="yellow">Booking access</Badge>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   <span className={`w-2 h-2 rounded-full ${admin.status === 'active' ? 'bg-green-500' : 'bg-gray-400'}`}></span>
                   <span className="text-sm text-aa-gray">
@@ -419,6 +428,40 @@ export default function AdminsPage() {
                 );
               })}
             </div>
+            <p className="mt-2 text-xs text-aa-gray">
+              New admins still stay product-based, service-based, or both. Booking access is added separately.
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-gray-200 p-3">
+            <p className="text-sm font-semibold text-aa-text-dark">Booking Section</p>
+            <p className="mt-1 text-xs text-aa-gray">
+              Allow this admin to manage hotel rooms, tables, and other booking-only offerings from a separate sidebar section.
+            </p>
+            {editForm.admin_tier === 'super_admin' ? (
+              <div className="mt-3">
+                <Badge variant="yellow">Super admins always have booking access</Badge>
+              </div>
+            ) : (
+              <label className="mt-3 flex items-center justify-between gap-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+                <div>
+                  <p className="text-sm font-semibold text-aa-text-dark">
+                    {editForm.booking_enabled ? 'Booking enabled' : 'Booking disabled'}
+                  </p>
+                  <p className="text-xs text-aa-gray">
+                    Booking items will appear in the Booking sidebar and their records can be marked as booking inside appointments.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={Boolean(editForm.booking_enabled)}
+                  onChange={(event) =>
+                    setEditForm((prev) => ({ ...prev, booking_enabled: event.target.checked }))
+                  }
+                  className="h-4 w-4 accent-aa-orange"
+                />
+              </label>
+            )}
           </div>
 
           <div>
@@ -461,15 +504,18 @@ export default function AdminsPage() {
                 placeholder="30"
               />
               <div>
-                <label className="block text-sm font-semibold text-aa-text-dark mb-2">Unit</label>
-                <select
+                <GeminiSelect
+                  label="Unit"
                   value={editForm.access_duration_unit}
-                  onChange={handleEditChange('access_duration_unit')}
-                  className="w-full rounded-lg border-2 border-gray-200 px-4 py-2.5 text-sm outline-none focus:border-aa-orange sm:py-3 sm:text-base"
-                >
-                  <option value="days">Days</option>
-                  <option value="months">Months</option>
-                </select>
+                  onChange={(value) =>
+                    setEditForm((prev) => ({ ...prev, access_duration_unit: value }))
+                  }
+                  options={[
+                    { value: 'days', label: 'Days' },
+                    { value: 'months', label: 'Months' },
+                  ]}
+                  variant="warm"
+                />
               </div>
             </div>
             {editForm.access_expires_at && (

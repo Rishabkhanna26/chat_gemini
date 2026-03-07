@@ -1,17 +1,21 @@
 import { createAppointment, getAppointments, getUserById } from '../../../lib/db-helpers';
 import { parsePagination, parseSearch, parseStatus } from '../../../lib/api-utils';
 import { requireAuth } from '../../../lib/auth-server';
-import { hasServiceAccess } from '../../../lib/business.js';
+import { hasAppointmentAccess, hasBookingAccess, hasServiceAccess } from '../../../lib/business.js';
 
 const ALLOWED_STATUSES = new Set(['booked', 'completed', 'cancelled']);
 const ALLOWED_PAYMENT_METHODS = new Set(['cash', 'card', 'upi', 'bank', 'wallet', 'other', '']);
+const ALLOWED_APPOINTMENT_KINDS = new Set(['service', 'booking']);
+
+const resolveDefaultAppointmentKind = (user) =>
+  hasBookingAccess(user) && !hasServiceAccess(user) ? 'booking' : 'service';
 
 export async function GET(req) {
   try {
     const authUser = await requireAuth();
-    if (!hasServiceAccess(authUser)) {
+    if (!hasAppointmentAccess(authUser)) {
       return Response.json(
-        { success: false, error: 'Appointments are disabled for this business type.' },
+        { success: false, error: 'Appointments are disabled for this admin.' },
         { status: 403 }
       );
     }
@@ -51,9 +55,9 @@ export async function GET(req) {
 export async function POST(req) {
   try {
     const authUser = await requireAuth();
-    if (!hasServiceAccess(authUser)) {
+    if (!hasAppointmentAccess(authUser)) {
       return Response.json(
-        { success: false, error: 'Appointments are disabled for this business type.' },
+        { success: false, error: 'Appointments are disabled for this admin.' },
         { status: 403 }
       );
     }
@@ -75,6 +79,21 @@ export async function POST(req) {
     const status = String(body?.status || 'booked');
     if (!ALLOWED_STATUSES.has(status)) {
       return Response.json({ success: false, error: 'Invalid status.' }, { status: 400 });
+    }
+
+    const appointmentKind = String(
+      body?.appointment_kind || resolveDefaultAppointmentKind(authUser)
+    )
+      .trim()
+      .toLowerCase();
+    if (!ALLOWED_APPOINTMENT_KINDS.has(appointmentKind)) {
+      return Response.json({ success: false, error: 'Invalid appointment kind.' }, { status: 400 });
+    }
+    if (appointmentKind === 'booking' && !hasBookingAccess(authUser)) {
+      return Response.json({ success: false, error: 'Booking access is not enabled.' }, { status: 403 });
+    }
+    if (appointmentKind === 'service' && !hasServiceAccess(authUser)) {
+      return Response.json({ success: false, error: 'Service appointments are disabled for this admin.' }, { status: 403 });
     }
 
     const appointmentType = String(body?.appointment_type || '').trim();
@@ -103,6 +122,7 @@ export async function POST(req) {
       user_id: userId,
       admin_id: authUser.id,
       appointment_type: appointmentType || null,
+      appointment_kind: appointmentKind,
       start_time: start.toISOString(),
       end_time: end.toISOString(),
       status,

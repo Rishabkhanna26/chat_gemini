@@ -6,7 +6,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faMessage, faUsers, faCircleCheck, faCircleExclamation, faCalendarPlus, faCartShopping, faCalendarCheck } from '@fortawesome/free-solid-svg-icons';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
-import { hasProductAccess, hasServiceAccess } from '../../lib/business.js';
+import { hasAppointmentAccess, hasProductAccess } from '../../lib/business.js';
 
 const OVERVIEW_METRICS = [
 	{ key: 'total_users', name: 'Users' },
@@ -33,6 +33,14 @@ export default function DashboardPage() {
 		ai_prompt: '',
 		ai_blocklist: '',
 		automation_enabled: true,
+		whatsapp_pending_recovery_enabled: true,
+		whatsapp_only_post_config_messages: true,
+		whatsapp_preconfig_message_grace_ms: 30000,
+		whatsapp_recovery_window_hours: 24,
+		whatsapp_recovery_batch_limit: 20,
+		whatsapp_recovery_analysis_message_limit: 18,
+		whatsapp_recovery_ai_required: true,
+		whatsapp_recovery_ai_model: '',
 		appointment_start_hour: 9,
 		appointment_end_hour: 20,
 		appointment_slot_minutes: 60,
@@ -64,6 +72,29 @@ export default function DashboardPage() {
 				ai_prompt: aiData?.data?.ai_prompt || '',
 				ai_blocklist: aiData?.data?.ai_blocklist || '',
 				automation_enabled: aiData?.data?.automation_enabled !== false,
+				whatsapp_pending_recovery_enabled:
+					aiData?.data?.whatsapp_pending_recovery_enabled !== false,
+				whatsapp_only_post_config_messages:
+					aiData?.data?.whatsapp_only_post_config_messages !== false,
+				whatsapp_preconfig_message_grace_ms:
+					Number.isInteger(aiData?.data?.whatsapp_preconfig_message_grace_ms)
+						? aiData.data.whatsapp_preconfig_message_grace_ms
+						: 30000,
+				whatsapp_recovery_window_hours:
+					Number.isInteger(aiData?.data?.whatsapp_recovery_window_hours)
+						? aiData.data.whatsapp_recovery_window_hours
+						: 24,
+				whatsapp_recovery_batch_limit:
+					Number.isInteger(aiData?.data?.whatsapp_recovery_batch_limit)
+						? aiData.data.whatsapp_recovery_batch_limit
+						: 20,
+				whatsapp_recovery_analysis_message_limit:
+					Number.isInteger(aiData?.data?.whatsapp_recovery_analysis_message_limit)
+						? aiData.data.whatsapp_recovery_analysis_message_limit
+						: 18,
+				whatsapp_recovery_ai_required:
+					aiData?.data?.whatsapp_recovery_ai_required !== false,
+				whatsapp_recovery_ai_model: aiData?.data?.whatsapp_recovery_ai_model || '',
 				appointment_start_hour: Number.isInteger(aiData?.data?.appointment_start_hour)
 					? aiData.data.appointment_start_hour
 					: 9,
@@ -92,6 +123,42 @@ export default function DashboardPage() {
 			setAiSaving(false);
 			return;
 		}
+		if (
+			!Number.isFinite(aiSettings.whatsapp_preconfig_message_grace_ms) ||
+			aiSettings.whatsapp_preconfig_message_grace_ms < 0 ||
+			aiSettings.whatsapp_preconfig_message_grace_ms > 300000
+		) {
+			setAiStatus('Time buffer must be between 0 and 300000 ms.');
+			setAiSaving(false);
+			return;
+		}
+		if (
+			!Number.isFinite(aiSettings.whatsapp_recovery_window_hours) ||
+			aiSettings.whatsapp_recovery_window_hours < 1 ||
+			aiSettings.whatsapp_recovery_window_hours > 168
+		) {
+			setAiStatus('Look-back time must be between 1 and 168 hours.');
+			setAiSaving(false);
+			return;
+		}
+		if (
+			!Number.isFinite(aiSettings.whatsapp_recovery_batch_limit) ||
+			aiSettings.whatsapp_recovery_batch_limit < 1 ||
+			aiSettings.whatsapp_recovery_batch_limit > 200
+		) {
+			setAiStatus('Max chats per round must be between 1 and 200.');
+			setAiSaving(false);
+			return;
+		}
+		if (
+			!Number.isFinite(aiSettings.whatsapp_recovery_analysis_message_limit) ||
+			aiSettings.whatsapp_recovery_analysis_message_limit < 6 ||
+			aiSettings.whatsapp_recovery_analysis_message_limit > 80
+		) {
+			setAiStatus('Past messages for AI must be between 6 and 80.');
+			setAiSaving(false);
+			return;
+		}
 		try {
 			const response = await fetch('/api/ai-settings', {
 				method: 'PUT',
@@ -100,13 +167,40 @@ export default function DashboardPage() {
 			});
 			const data = await response.json();
 			if (!response.ok) {
-				throw new Error(data.error || 'Failed to save AI settings');
+				throw new Error(data.error || 'Could not save auto-reply settings.');
 			}
 			setAiSettings({
 				ai_enabled: Boolean(data?.data?.ai_enabled),
 				ai_prompt: data?.data?.ai_prompt || '',
 				ai_blocklist: data?.data?.ai_blocklist || '',
 				automation_enabled: data?.data?.automation_enabled !== false,
+				whatsapp_pending_recovery_enabled:
+					data?.data?.whatsapp_pending_recovery_enabled !== false,
+				whatsapp_only_post_config_messages:
+					data?.data?.whatsapp_only_post_config_messages !== false,
+				whatsapp_preconfig_message_grace_ms: Number.isInteger(
+					data?.data?.whatsapp_preconfig_message_grace_ms
+				)
+					? data.data.whatsapp_preconfig_message_grace_ms
+					: 30000,
+				whatsapp_recovery_window_hours: Number.isInteger(
+					data?.data?.whatsapp_recovery_window_hours
+				)
+					? data.data.whatsapp_recovery_window_hours
+					: 24,
+				whatsapp_recovery_batch_limit: Number.isInteger(
+					data?.data?.whatsapp_recovery_batch_limit
+				)
+					? data.data.whatsapp_recovery_batch_limit
+					: 20,
+				whatsapp_recovery_analysis_message_limit: Number.isInteger(
+					data?.data?.whatsapp_recovery_analysis_message_limit
+				)
+					? data.data.whatsapp_recovery_analysis_message_limit
+					: 18,
+				whatsapp_recovery_ai_required:
+					data?.data?.whatsapp_recovery_ai_required !== false,
+				whatsapp_recovery_ai_model: data?.data?.whatsapp_recovery_ai_model || '',
 				appointment_start_hour: Number.isInteger(data?.data?.appointment_start_hour)
 					? data.data.appointment_start_hour
 					: 9,
@@ -120,10 +214,10 @@ export default function DashboardPage() {
 					? data.data.appointment_window_months
 					: 3,
 			});
-			setAiStatus('Automation settings saved.');
+			setAiStatus('Auto-reply settings saved.');
 			setTimeout(() => setAiStatus(''), 2000);
 		} catch (error) {
-			setAiStatus(error.message || 'Failed to save AI settings.');
+			setAiStatus(error.message || 'Could not save auto-reply settings.');
 		} finally {
 			setAiSaving(false);
 		}
@@ -154,7 +248,7 @@ export default function DashboardPage() {
 
 	const recentMessages = messages.slice(0, 5);
   const showOrders = Boolean(user?.id) && hasProductAccess(user);
-  const showAppointments = Boolean(user?.id) && hasServiceAccess(user);
+  const showAppointments = Boolean(user?.id) && hasAppointmentAccess(user);
 
 	return (
 		<div className="p-4 sm:p-6 space-y-6">
@@ -332,12 +426,12 @@ export default function DashboardPage() {
 
 			{/* AI Reply Controls */}
 			<div className="bg-white p-4 sm:p-6 rounded-lg border border-gray-200 shadow-sm">
-				<h2 className="text-xl font-bold text-gray-900 mb-2">WhatsApp AI Replies</h2>
+				<h2 className="text-xl font-bold text-gray-900 mb-2">WhatsApp Auto Replies</h2>
 				<p className="text-gray-600 mb-6">
-					Control what the AI is allowed to say. These rules apply to WhatsApp auto-replies.
+					Set what auto replies can say on WhatsApp.
 				</p>
 				<p className="text-xs text-gray-500 mb-6">
-					Requires <span className="font-semibold">OPENROUTER_API_KEY</span> on the backend.
+					To use smart replies, add <span className="font-semibold">OPENROUTER_API_KEY</span> in server settings.
 				</p>
 				<div className="flex items-center gap-3 mb-6">
 					<input
@@ -350,7 +444,7 @@ export default function DashboardPage() {
 						className="h-4 w-4"
 					/>
 					<label htmlFor="automation-enabled" className="text-sm font-semibold text-gray-800">
-						Enable automation messages
+						Turn on auto replies
 					</label>
 				</div>
 				<div className="flex items-center gap-3 mb-6">
@@ -364,13 +458,13 @@ export default function DashboardPage() {
 						className="h-4 w-4"
 					/>
 					<label htmlFor="ai-enabled" className="text-sm font-semibold text-gray-800">
-						Enable AI replies
+						Use smart replies
 					</label>
 				</div>
 				<div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
 					<div>
 						<label className="block text-sm font-semibold text-gray-800 mb-2">
-							Allowed topics / style
+							What replies can talk about
 						</label>
 						<textarea
 							value={aiSettings.ai_prompt}
@@ -384,7 +478,7 @@ export default function DashboardPage() {
 					</div>
 					<div>
 						<label className="block text-sm font-semibold text-gray-800 mb-2">
-							Blocked topics (do not discuss)
+							What replies should avoid
 						</label>
 						<textarea
 							value={aiSettings.ai_blocklist}
@@ -398,14 +492,14 @@ export default function DashboardPage() {
 					</div>
 				</div>
 				<div className="rounded-lg border border-gray-200 p-4 mb-4">
-					<h3 className="text-sm font-semibold text-gray-900 mb-1">Appointment Booking Rules</h3>
+					<h3 className="text-sm font-semibold text-gray-900 mb-1">Appointment Time Rules</h3>
 					<p className="text-xs text-gray-500 mb-4">
-						These control WhatsApp appointment slots and can be changed anytime.
+						Set your working hours and slot length.
 					</p>
 					<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
 						<div>
 							<label className="block text-xs font-semibold text-gray-700 mb-1">
-								Start Hour (0-23)
+								Start Time (0-23)
 							</label>
 							<input
 								type="number"
@@ -422,7 +516,7 @@ export default function DashboardPage() {
 						</div>
 						<div>
 							<label className="block text-xs font-semibold text-gray-700 mb-1">
-								End Hour (1-24)
+								End Time (1-24)
 							</label>
 							<input
 								type="number"
@@ -439,7 +533,7 @@ export default function DashboardPage() {
 						</div>
 						<div>
 							<label className="block text-xs font-semibold text-gray-700 mb-1">
-								Slot Minutes
+								Each Slot (minutes)
 							</label>
 							<input
 								type="number"
@@ -457,7 +551,7 @@ export default function DashboardPage() {
 						</div>
 						<div>
 							<label className="block text-xs font-semibold text-gray-700 mb-1">
-								Window (Months)
+								Book Ahead (months)
 							</label>
 							<input
 								type="number"
@@ -474,13 +568,163 @@ export default function DashboardPage() {
 						</div>
 					</div>
 				</div>
+				<div className="rounded-lg border border-gray-200 p-4 mb-4">
+					<h3 className="text-sm font-semibold text-gray-900 mb-1">Old Chat Reply Rules</h3>
+					<p className="text-xs text-gray-500 mb-4">
+						Choose how old unread chats are handled after WhatsApp connects.
+					</p>
+					<div className="space-y-3 mb-4">
+						<label className="flex items-center gap-3 text-sm text-gray-800">
+							<input
+								type="checkbox"
+								checked={aiSettings.whatsapp_pending_recovery_enabled !== false}
+								onChange={(e) =>
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_pending_recovery_enabled: e.target.checked,
+									}))
+								}
+								className="h-4 w-4"
+							/>
+							Check unread messages after WhatsApp connects
+						</label>
+						<label className="flex items-center gap-3 text-sm text-gray-800">
+							<input
+								type="checkbox"
+								checked={aiSettings.whatsapp_only_post_config_messages !== false}
+								onChange={(e) =>
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_only_post_config_messages: e.target.checked,
+									}))
+								}
+								className="h-4 w-4"
+							/>
+							Reply only to messages that came after setup
+						</label>
+						<label className="flex items-center gap-3 text-sm text-gray-800">
+							<input
+								type="checkbox"
+								checked={aiSettings.whatsapp_recovery_ai_required !== false}
+								onChange={(e) =>
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_recovery_ai_required: e.target.checked,
+									}))
+								}
+								className="h-4 w-4"
+							/>
+							Let AI review before sending any old-chat reply
+						</label>
+					</div>
+					<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Before-Setup Buffer (ms)
+							</label>
+							<input
+								type="number"
+								min="0"
+								max="300000"
+								step="1000"
+								value={aiSettings.whatsapp_preconfig_message_grace_ms}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_preconfig_message_grace_ms: next,
+									}));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Look-back Time (hours)
+							</label>
+							<input
+								type="number"
+								min="1"
+								max="168"
+								value={aiSettings.whatsapp_recovery_window_hours}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_recovery_window_hours: next,
+									}));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Max Chats per Round
+							</label>
+							<input
+								type="number"
+								min="1"
+								max="200"
+								value={aiSettings.whatsapp_recovery_batch_limit}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_recovery_batch_limit: next,
+									}));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+						<div>
+							<label className="block text-xs font-semibold text-gray-700 mb-1">
+								Past Messages for AI
+							</label>
+							<input
+								type="number"
+								min="6"
+								max="80"
+								value={aiSettings.whatsapp_recovery_analysis_message_limit}
+								onChange={(e) => {
+									const next = Number.parseInt(e.target.value, 10);
+									if (!Number.isFinite(next)) return;
+									setAiSettings((prev) => ({
+										...prev,
+										whatsapp_recovery_analysis_message_limit: next,
+									}));
+								}}
+								className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+							/>
+						</div>
+					</div>
+					<div className="mt-4">
+						<label className="block text-xs font-semibold text-gray-700 mb-1">
+							AI Model for Old Chats (optional)
+						</label>
+						<input
+							type="text"
+							value={aiSettings.whatsapp_recovery_ai_model || ''}
+							onChange={(e) =>
+								setAiSettings((prev) => ({
+									...prev,
+									whatsapp_recovery_ai_model: e.target.value,
+								}))
+							}
+							placeholder="e.g. google/gemini-2.0-flash-001"
+							className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-aa-orange"
+						/>
+					</div>
+				</div>
 				<div className="flex flex-col gap-3 sm:flex-row sm:items-center">
 					<button
 						onClick={saveAiSettings}
 						disabled={aiSaving}
 						className="px-5 py-2 rounded-full bg-aa-orange text-white font-semibold disabled:opacity-60 disabled:cursor-not-allowed"
 					>
-						{aiSaving ? 'Saving...' : 'Save Automation Settings'}
+						{aiSaving ? 'Saving...' : 'Save Auto-Reply Settings'}
 					</button>
 					{aiStatus && (
 						<span className={`text-sm font-semibold ${aiStatus.includes('Failed') ? 'text-red-600' : 'text-green-600'}`}>

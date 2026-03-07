@@ -1,5 +1,5 @@
 import { requireAuth } from '../../../../lib/auth-server';
-import { getOrderById, updateOrder } from '../../../../lib/db-helpers';
+import { deleteOrder, getOrderById, updateOrder } from '../../../../lib/db-helpers';
 import { hasProductAccess } from '../../../../lib/business.js';
 import { isRazorpayConfigured, verifyRazorpayPaymentLink } from '../../../../lib/razorpay.js';
 
@@ -68,6 +68,11 @@ const formatCurrency = (value = 0, currency = 'INR') => {
   } catch (_error) {
     return `${currency} ${safe.toFixed(2)}`;
   }
+};
+
+const toTrimmed = (value) => {
+  const text = String(value || '').trim();
+  return text || '';
 };
 
 const buildVerifiedPaymentNotes = ({
@@ -171,6 +176,15 @@ export async function PATCH(request, context) {
     if (Object.prototype.hasOwnProperty.call(body, 'payment_notes')) {
       updates.payment_notes = String(body?.payment_notes || '').trim() || null;
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'payment_transaction_id')) {
+      updates.payment_transaction_id = toTrimmed(body?.payment_transaction_id) || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'payment_gateway_payment_id')) {
+      updates.payment_gateway_payment_id = toTrimmed(body?.payment_gateway_payment_id) || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'payment_link_id')) {
+      updates.payment_link_id = toTrimmed(body?.payment_link_id) || null;
+    }
 
     if (Object.prototype.hasOwnProperty.call(body, 'assigned_to')) {
       updates.assigned_to = String(body?.assigned_to || '').trim() || null;
@@ -198,6 +212,8 @@ export async function PATCH(request, context) {
         extractPaymentProofId(currentOrder?.payment_notes);
 
       const linkId =
+        toTrimmed(body?.payment_link_id) ||
+        toTrimmed(currentOrder?.payment_link_id) ||
         extractPaymentLinkId(body?.payment_link_id) ||
         extractPaymentLinkId(body?.payment_notes) ||
         extractPaymentLinkId(currentOrder?.payment_notes);
@@ -260,7 +276,14 @@ export async function PATCH(request, context) {
 
       const verifiedLinkAmount = Number(verification?.paidAmount || 0);
       const hasVerifiedAmount = Number.isFinite(verifiedLinkAmount) && verifiedLinkAmount > 0;
-      const existingNotesLower = String(currentOrder?.payment_notes || '').toLowerCase();
+      const existingNotesLower = [
+        currentOrder?.payment_notes,
+        currentOrder?.payment_transaction_id,
+        currentOrder?.payment_gateway_payment_id,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
       const transactionId = String(verification?.transactionId || '').trim();
       const paymentId = String(verification?.paymentId || '').trim();
       const alreadyRecorded = [transactionId, paymentId]
@@ -297,6 +320,20 @@ export async function PATCH(request, context) {
         linkId,
         accumulatedPaid,
       });
+      updates.payment_transaction_id =
+        toTrimmed(verification?.transactionId) ||
+        toTrimmed(proofId) ||
+        toTrimmed(currentOrder?.payment_transaction_id) ||
+        null;
+      updates.payment_gateway_payment_id =
+        toTrimmed(verification?.paymentId) ||
+        toTrimmed(currentOrder?.payment_gateway_payment_id) ||
+        null;
+      updates.payment_link_id =
+        toTrimmed(verification?.linkId) ||
+        toTrimmed(linkId) ||
+        toTrimmed(currentOrder?.payment_link_id) ||
+        null;
       if (!updates.payment_method) {
         updates.payment_method = currentOrder?.payment_method || 'upi';
       }
@@ -312,6 +349,37 @@ export async function PATCH(request, context) {
     }
 
     return Response.json({ success: true, data: updated });
+  } catch (error) {
+    if (error.status === 401) {
+      return Response.json({ success: false, error: 'Unauthorized' }, { status: 401 });
+    }
+    return Response.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request, context) {
+  try {
+    const authUser = await requireAuth();
+    if (!hasProductAccess(authUser)) {
+      return Response.json(
+        { success: false, error: 'Orders are disabled for this business type.' },
+        { status: 403 }
+      );
+    }
+
+    const params = await context.params;
+    const orderId = Number(params?.id);
+    if (!Number.isFinite(orderId)) {
+      return Response.json({ success: false, error: 'Invalid order id' }, { status: 400 });
+    }
+
+    const adminScopeId = authUser.admin_tier === 'super_admin' ? null : authUser.id;
+    const deleted = await deleteOrder(orderId, adminScopeId);
+    if (!deleted) {
+      return Response.json({ success: false, error: 'Order not found' }, { status: 404 });
+    }
+
+    return Response.json({ success: true, data: deleted });
   } catch (error) {
     if (error.status === 401) {
       return Response.json({ success: false, error: 'Unauthorized' }, { status: 401 });

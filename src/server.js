@@ -1,5 +1,5 @@
+import "dotenv/config";
 import express from "express";
-import dotenv from "dotenv";
 import http from "node:http";
 import fs from "node:fs/promises";
 import compression from "compression";
@@ -37,8 +37,6 @@ import {
 } from "../middleware/security.js";
 // Import graceful shutdown handler (Task 10.4)
 import "./shutdown.js";
-
-dotenv.config();
 
 const app = express();
 
@@ -418,13 +416,17 @@ app.get("/whatsapp/status", (req, res) => {
 
 app.post("/whatsapp/start", async (req, res) => {
   try {
-    const result = await startWhatsApp(getScopedAdminIdFromRequest(req));
+    const adminId = getScopedAdminIdFromRequest(req);
+    const result = await startWhatsApp(adminId, {
+      authMethod: req.body?.authMethod ?? req.body?.authMode,
+      phoneNumber: req.body?.phoneNumber ?? req.body?.pairingPhoneNumber,
+    });
     if (result?.error) {
-      logger.warn("WhatsApp start failed", { error: result.error, adminId: getScopedAdminIdFromRequest(req) });
+      logger.warn("WhatsApp start failed", { error: result.error, adminId });
       res.status(400).json(result);
       return;
     }
-    logger.info("WhatsApp started successfully", { adminId: getScopedAdminIdFromRequest(req) });
+    logger.info("WhatsApp started successfully", { adminId });
     res.json(result);
   } catch (err) {
     logger.error("Failed to start WhatsApp", { error: err.message, stack: err.stack });

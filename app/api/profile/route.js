@@ -9,6 +9,17 @@ import { sanitizeEmail, sanitizeNameUpper, sanitizeText } from '../../../lib/san
 export const runtime = 'nodejs';
 
 const getSafeFolder = (value) => String(value || '').replace(/\D/g, '');
+const normalizeBusinessUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+};
 
 const getProfilePhotoUrl = async (phone) => {
   const folderName = getSafeFolder(phone);
@@ -65,12 +76,24 @@ export async function PUT(request) {
     const body = await request.json();
     const name = typeof body.name === 'string' ? sanitizeNameUpper(body.name) : undefined;
     const email = typeof body.email === 'string' ? sanitizeEmail(body.email) || '' : undefined;
+    const businessName =
+      typeof body.business_name === 'string' ? sanitizeText(body.business_name, 140) : undefined;
     const businessCategory =
       typeof body.business_category === 'string'
         ? sanitizeText(body.business_category, 120)
         : undefined;
     const businessTypeRaw =
       typeof body.business_type === 'string' ? body.business_type.trim().toLowerCase() : undefined;
+    const businessAddress =
+      typeof body.business_address === 'string'
+        ? sanitizeText(body.business_address, 500)
+        : undefined;
+    const businessHours =
+      typeof body.business_hours === 'string' ? sanitizeText(body.business_hours, 160) : undefined;
+    const businessMapUrl =
+      typeof body.business_map_url === 'string'
+        ? normalizeBusinessUrl(body.business_map_url)
+        : undefined;
     const allowedBusinessTypes = new Set(['product', 'service', 'both']);
     const businessType =
       businessTypeRaw && allowedBusinessTypes.has(businessTypeRaw)
@@ -80,8 +103,12 @@ export async function PUT(request) {
     const admin = await updateAdminProfile(user.id, {
       name,
       email,
+      business_name: businessName,
       business_category: businessCategory,
       business_type: businessType,
+      business_address: businessAddress,
+      business_hours: businessHours,
+      business_map_url: businessMapUrl,
     });
     if (!admin) {
       return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
@@ -92,8 +119,13 @@ export async function PUT(request) {
       email: admin.email,
       phone: admin.phone,
       admin_tier: admin.admin_tier,
+      business_name: admin.business_name,
       business_category: admin.business_category,
       business_type: admin.business_type,
+      booking_enabled: admin.booking_enabled,
+      business_address: admin.business_address,
+      business_hours: admin.business_hours,
+      business_map_url: admin.business_map_url,
       access_expires_at: admin.access_expires_at,
     });
 

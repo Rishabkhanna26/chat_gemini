@@ -12,6 +12,7 @@ import {
   faBullseye,
 } from '@fortawesome/free-solid-svg-icons';
 import Button from '../components/common/Button.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 
 export default function ReportsPage() {
   const [reports, setReports] = useState(null);
@@ -75,16 +76,20 @@ export default function ReportsPage() {
           <p className="text-aa-gray">Track your business performance and insights</p>
         </div>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center w-full sm:w-auto">
-          <select
+          <GeminiSelect
+            label="Date Range"
             value={dateRange}
-            onChange={(e) => setDateRange(e.target.value)}
-            className="w-full sm:w-auto px-4 py-2 border-2 border-gray-200 rounded-lg outline-none focus:border-aa-orange"
-          >
-            <option value="7days">Last 7 Days</option>
-            <option value="30days">Last 30 Days</option>
-            <option value="90days">Last 90 Days</option>
-            <option value="1year">Last Year</option>
-          </select>
+            onChange={setDateRange}
+            options={[
+              { value: '7days', label: 'Last 7 Days' },
+              { value: '30days', label: 'Last 30 Days' },
+              { value: '90days', label: 'Last 90 Days' },
+              { value: '1year', label: 'Last Year' },
+            ]}
+            className="w-full sm:w-[220px]"
+            size="sm"
+            variant="vibrant"
+          />
           <Button
             variant="outline"
             icon={<FontAwesomeIcon icon={faDownload} style={{ fontSize: 18 }} />}

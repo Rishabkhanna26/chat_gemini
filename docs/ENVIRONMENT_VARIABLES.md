@@ -10,9 +10,10 @@ This document provides a comprehensive reference for all environment variables u
 4. [Performance Tuning Variables](#performance-tuning-variables)
 5. [Cleanup and Retention Variables](#cleanup-and-retention-variables)
 6. [Resilience Variables](#resilience-variables)
-7. [Static vs Dynamic Configuration](#static-vs-dynamic-configuration)
-8. [Configuration File Reference](#configuration-file-reference)
-9. [Best Practices](#best-practices)
+7. [AI and OpenRouter Variables](#ai-and-openrouter-variables)
+8. [Static vs Dynamic Configuration](#static-vs-dynamic-configuration)
+9. [Configuration File Reference](#configuration-file-reference)
+10. [Best Practices](#best-practices)
 
 ---
 
@@ -541,6 +542,550 @@ open() {
 ```
 
 **Recommendation:** Use static value unless specific tuning needed
+
+---
+
+## AI and OpenRouter Variables
+
+### OPENROUTER_API_KEY
+
+**Purpose:** API key for OpenRouter service (AI chatbot)
+
+**Used In:**
+- `src/whatsapp.js` - AI response generation
+- `src/openrouter.js` - API requests
+
+**Type:** String (API key)
+
+**Default:** None (AI features disabled if not set)
+
+**Can Be Static?** ❌ **Must use environment variable**
+
+**Reason:**
+- Contains sensitive credentials
+- Security best practice (never commit to code)
+- Different keys per environment (dev/prod)
+
+**Example:**
+```bash
+# .env
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxx
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
+
+if (!OPENROUTER_API_KEY) {
+  // AI features disabled, use fallback automation
+}
+```
+
+**Notes:**
+- Get your API key from: https://openrouter.ai/keys
+- Free tier available with rate limits
+- System works without AI (falls back to menu-based automation)
+
+---
+
+### OPENROUTER_MODEL
+
+**Purpose:** Primary AI model to use for chatbot responses
+
+**Used In:**
+- `src/whatsapp.js` - AI model selection
+- `src/openrouter.js` - Default model configuration
+
+**Type:** String (model identifier)
+
+**Default:** `"meta-llama/llama-3.3-70b-instruct:free"`
+
+**Can Be Static?** ✅ **Can be static, but environment variable recommended**
+
+**Reason:**
+- May want different models per environment
+- Easy to test new models without code changes
+- Can optimize for cost/performance per environment
+
+**Example:**
+```bash
+# .env
+OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+
+# Alternative models
+OPENROUTER_MODEL=liquid/lfm-2.5-1.2b-instruct:free  # Faster, simpler
+OPENROUTER_MODEL=google/gemini-2.0-flash-exp:free   # More capable
+```
+
+**Static Alternative:**
+```javascript
+// src/openrouter.js
+export const DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL;
+```
+
+**Recommendation:** Use environment variable for flexibility
+
+**Available Free Models:**
+- `meta-llama/llama-3.3-70b-instruct:free` - Best for conversational AI (recommended)
+- `liquid/lfm-2.5-1.2b-instruct:free` - Ultra-fast, lightweight
+- `arcee-ai/trinity-large-preview:free` - Balanced performance
+- `google/gemini-2.0-flash-exp:free` - Complex reasoning
+
+---
+
+### OPENROUTER_FALLBACK_MODELS
+
+**Purpose:** Comma-separated list of fallback models if primary fails
+
+**Used In:**
+- `src/whatsapp.js` - Fallback model selection
+- `src/openrouter.js` - Model candidate building
+
+**Type:** String (comma-separated model identifiers)
+
+**Default:** `"liquid/lfm-2.5-1.2b-instruct:free,arcee-ai/trinity-large-preview:free,google/gemini-2.0-flash-exp:free"`
+
+**Can Be Static?** ✅ **Can be static, but environment variable recommended**
+
+**Reason:**
+- Provides resilience against model failures
+- Can customize fallback strategy per environment
+- Easy to update without code changes
+
+**Example:**
+```bash
+# .env
+OPENROUTER_FALLBACK_MODELS=liquid/lfm-2.5-1.2b-instruct:free,arcee-ai/trinity-large-preview:free,google/gemini-2.0-flash-exp:free
+
+# Speed-optimized fallback chain
+OPENROUTER_FALLBACK_MODELS=liquid/lfm-2.5-1.2b-instruct:free,meta-llama/llama-3.3-70b-instruct:free
+
+# Quality-optimized fallback chain
+OPENROUTER_FALLBACK_MODELS=google/gemini-2.0-flash-exp:free,arcee-ai/trinity-large-preview:free
+```
+
+**Static Alternative:**
+```javascript
+// src/openrouter.js
+export const DEFAULT_OPENROUTER_FALLBACK_MODELS = Object.freeze([
+  "liquid/lfm-2.5-1.2b-instruct:free",
+  "arcee-ai/trinity-large-preview:free",
+  "google/gemini-2.0-flash-exp:free",
+]);
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const OPENROUTER_FALLBACK_MODELS = 
+  process.env.OPENROUTER_FALLBACK_MODELS || 
+  DEFAULT_OPENROUTER_FALLBACK_MODELS.join(",");
+
+// src/openrouter.js
+const candidates = buildOpenRouterModelCandidates({
+  primaryModel: OPENROUTER_MODEL,
+  fallbackModels: OPENROUTER_FALLBACK_MODELS,
+});
+```
+
+**Recommendation:** Use environment variable for operational flexibility
+
+---
+
+### OPENROUTER_ENDPOINT
+
+**Purpose:** OpenRouter API endpoint URL
+
+**Used In:**
+- `src/whatsapp.js` - API requests
+- `src/openrouter.js` - HTTP client configuration
+
+**Type:** String (URL)
+
+**Default:** `"https://openrouter.ai/api/v1/chat/completions"`
+
+**Can Be Static?** ✅ **Can be static**
+
+**Reason:**
+- Rarely changes
+- Same endpoint for all environments
+- Only override for testing or custom deployments
+
+**Example:**
+```bash
+# .env
+OPENROUTER_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
+
+# Custom endpoint (testing)
+OPENROUTER_ENDPOINT=https://test-api.openrouter.ai/api/v1/chat/completions
+```
+
+**Static Alternative:**
+```javascript
+// src/whatsapp.js
+const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+```
+
+**Recommendation:** Use static value, override only for testing
+
+---
+
+### OPENROUTER_SITE_URL
+
+**Purpose:** Your website URL (for OpenRouter analytics)
+
+**Used In:**
+- `src/openrouter.js` - HTTP headers (HTTP-Referer)
+
+**Type:** String (URL)
+
+**Default:** `""` (empty, optional)
+
+**Can Be Static?** ❌ **Must use environment variable**
+
+**Reason:**
+- Different per environment (dev/staging/prod URLs)
+- Used for OpenRouter usage tracking
+- Optional but recommended
+
+**Example:**
+```bash
+# .env
+OPENROUTER_SITE_URL=https://yourdomain.com
+
+# Development
+OPENROUTER_SITE_URL=http://localhost:3000
+
+# Production
+OPENROUTER_SITE_URL=https://app.yourdomain.com
+```
+
+**Code Usage:**
+```javascript
+// src/openrouter.js
+headers: {
+  ...(siteUrl ? { "HTTP-Referer": siteUrl } : {}),
+}
+```
+
+**Recommendation:** Use environment variable (different per environment)
+
+---
+
+### OPENROUTER_SITE_NAME
+
+**Purpose:** Your application name (for OpenRouter analytics)
+
+**Used In:**
+- `src/openrouter.js` - HTTP headers (X-OpenRouter-Title)
+
+**Type:** String
+
+**Default:** `""` (empty, optional)
+
+**Can Be Static?** ✅ **Can be static**
+
+**Reason:**
+- Same name across all environments
+- Used for OpenRouter usage tracking
+- Optional but recommended
+
+**Example:**
+```bash
+# .env
+OPENROUTER_SITE_NAME=Mex-End WhatsApp Bot
+```
+
+**Static Alternative:**
+```javascript
+// src/whatsapp.js
+const OPENROUTER_SITE_NAME = "Mex-End WhatsApp Bot";
+```
+
+**Code Usage:**
+```javascript
+// src/openrouter.js
+headers: {
+  ...(siteName ? { "X-OpenRouter-Title": siteName } : {}),
+}
+```
+
+**Recommendation:** Use static value or environment variable (both work)
+
+---
+
+### WHATSAPP_USE_LEGACY_AUTOMATION
+
+**Purpose:** Toggle between AI-powered and legacy menu-based automation
+
+**Used In:**
+- `src/whatsapp.js` - Automation mode selection
+
+**Type:** Boolean (string)
+
+**Values:**
+- `"true"` - Use legacy menu-based automation (no AI)
+- `"false"` - Use AI-powered automation (default)
+
+**Default:** `"false"`
+
+**Can Be Static?** ⚠️ **Environment variable recommended**
+
+**Reason:**
+- Feature flag for gradual rollout
+- Allows quick fallback if AI issues occur
+- Can test both modes in different environments
+
+**Example:**
+```bash
+# .env
+WHATSAPP_USE_LEGACY_AUTOMATION=false  # Use AI (default)
+WHATSAPP_USE_LEGACY_AUTOMATION=true   # Use legacy menus
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const USE_OPENROUTER_ONLY_REPLY = 
+  String(process.env.WHATSAPP_USE_LEGACY_AUTOMATION || "")
+    .trim()
+    .toLowerCase() !== "true";
+
+if (USE_OPENROUTER_ONLY_REPLY && OPENROUTER_API_KEY) {
+  // Use AI-powered responses
+} else {
+  // Use legacy menu-based automation
+}
+```
+
+**Recommendation:** Use environment variable (feature flag)
+
+---
+
+### WHATSAPP_AI_GREETING_REQUIRED
+
+**Purpose:** Require AI greeting before responding to messages
+
+**Used In:**
+- `src/whatsapp.js` - Message handling logic
+
+**Type:** Boolean (string)
+
+**Values:**
+- `"true"` - Require greeting (hi, hello) before AI responds
+- `"false"` - AI responds to all messages (default)
+
+**Default:** `"false"`
+
+**Can Be Static?** ✅ **Can be static, but environment variable recommended**
+
+**Reason:**
+- Business rule that may change
+- Different behavior per environment
+- Easy to toggle without code changes
+
+**Example:**
+```bash
+# .env
+WHATSAPP_AI_GREETING_REQUIRED=false  # Respond to all messages (default)
+WHATSAPP_AI_GREETING_REQUIRED=true   # Require greeting first
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const REQUIRE_AI_GREETING = 
+  String(process.env.WHATSAPP_AI_GREETING_REQUIRED || "false")
+    .trim()
+    .toLowerCase() === "true";
+
+if (REQUIRE_AI_GREETING && !user.data.hasGreeted) {
+  if (!isAiGreetingTriggerMessage(userMessage)) {
+    return; // Don't respond until user greets
+  }
+  user.data.hasGreeted = true;
+}
+```
+
+**Recommendation:** Use environment variable for flexibility
+
+---
+
+### WHATSAPP_AI_HISTORY_LIMIT
+
+**Purpose:** Maximum number of conversation turns to include in AI context
+
+**Used In:**
+- `src/whatsapp.js` - Conversation history management
+
+**Type:** Number
+
+**Default:** `6` (updated from 8 for tighter context)
+
+**Can Be Static?** ✅ **Can be static, but environment variable recommended**
+
+**Reason:**
+- Performance tuning parameter
+- May need different values for testing
+- Affects AI response quality and cost
+
+**Example:**
+```bash
+# .env
+WHATSAPP_AI_HISTORY_LIMIT=6   # Recommended (tighter context)
+WHATSAPP_AI_HISTORY_LIMIT=8   # More context (previous default)
+WHATSAPP_AI_HISTORY_LIMIT=4   # Minimal context (faster)
+WHATSAPP_AI_HISTORY_LIMIT=10  # Maximum context (slower, more expensive)
+```
+
+**Static Alternative:**
+```javascript
+// src/whatsapp.js
+const AI_HISTORY_LIMIT = 6;
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const AI_HISTORY_LIMIT = Math.max(2, Number(process.env.WHATSAPP_AI_HISTORY_LIMIT || 6));
+
+const getAiConversationHistory = (user) => {
+  return (user?.data?.aiConversationHistory || [])
+    .slice(-AI_HISTORY_LIMIT);
+};
+```
+
+**Recommendation:** Use environment variable for tuning
+
+**Notes:**
+- Lower values = faster responses, less context
+- Higher values = better context understanding, slower
+- Recommended: 4-8 turns for WhatsApp conversations
+
+---
+
+### WHATSAPP_AI_AUTO_LANGUAGE
+
+**Purpose:** Automatically detect and respond in user's language
+
+**Used In:**
+- `src/whatsapp.js` - Language detection and response
+
+**Type:** Boolean (string)
+
+**Values:**
+- `"true"` - Auto-detect language (default)
+- `"false"` - Always respond in English
+
+**Default:** `"true"`
+
+**Can Be Static?** ✅ **Can be static, but environment variable recommended**
+
+**Reason:**
+- Business requirement (multilingual support)
+- May differ per market/environment
+- Easy to toggle for testing
+
+**Example:**
+```bash
+# .env
+WHATSAPP_AI_AUTO_LANGUAGE=true   # Auto-detect (default)
+WHATSAPP_AI_AUTO_LANGUAGE=false  # English only
+```
+
+**Code Usage:**
+```javascript
+// src/whatsapp.js
+const AI_AUTO_LANGUAGE = 
+  String(process.env.WHATSAPP_AI_AUTO_LANGUAGE || "true")
+    .trim()
+    .toLowerCase() !== "false";
+
+if (AI_AUTO_LANGUAGE) {
+  const responseLanguage = resolveLanguageProfile(userMessage);
+} else {
+  const responseLanguage = LANGUAGE_PROFILES.en;
+}
+```
+
+**Recommendation:** Use environment variable for market flexibility
+
+**Supported Languages:**
+- English (en)
+- Hindi (hi)
+- Hinglish (hinglish) - Hindi in Latin script
+- Arabic (ar)
+- Bengali (bn)
+- Punjabi (pa)
+- Gujarati (gu)
+- Tamil (ta)
+- Telugu (te)
+- Malayalam (ml)
+- Marathi (mr)
+- Urdu (ur)
+
+---
+
+### AI_SETTINGS_TTL_MS
+
+**Purpose:** Cache duration for admin AI settings
+
+**Used In:**
+- `src/whatsapp.js` - AI settings caching
+
+**Type:** Number (milliseconds)
+
+**Default:** `60000` (60 seconds)
+
+**Can Be Static?** ✅ **Can be static**
+
+**Reason:**
+- Performance optimization
+- Same value works for all environments
+- Rarely needs tuning
+
+**Example:**
+```bash
+# .env
+AI_SETTINGS_TTL_MS=60000   # 1 minute (default)
+AI_SETTINGS_TTL_MS=30000   # 30 seconds (more frequent updates)
+AI_SETTINGS_TTL_MS=120000  # 2 minutes (less frequent)
+```
+
+**Static Alternative:**
+```javascript
+// src/whatsapp.js
+const AI_SETTINGS_TTL_MS = 60000;
+```
+
+**Recommendation:** Use static value
+
+---
+
+## AI Configuration Summary Table
+
+| Variable | Required? | Can Be Static? | Recommendation | Default |
+|----------|-----------|----------------|----------------|---------|
+| `OPENROUTER_API_KEY` | Yes* | ❌ No | Env Var | None |
+| `OPENROUTER_MODEL` | No | ✅ Yes | Env Var | `meta-llama/llama-3.3-70b-instruct:free` |
+| `OPENROUTER_FALLBACK_MODELS` | No | ✅ Yes | Env Var | See above |
+| `OPENROUTER_ENDPOINT` | No | ✅ Yes | Static | `https://openrouter.ai/...` |
+| `OPENROUTER_SITE_URL` | No | ❌ No | Env Var | Empty |
+| `OPENROUTER_SITE_NAME` | No | ✅ Yes | Static/Env | Empty |
+| `WHATSAPP_USE_LEGACY_AUTOMATION` | No | ⚠️ Maybe | Env Var | `false` |
+| `WHATSAPP_AI_GREETING_REQUIRED` | No | ✅ Yes | Env Var | `false` |
+| `WHATSAPP_AI_HISTORY_LIMIT` | No | ✅ Yes | Env Var | `6` |
+| `WHATSAPP_AI_AUTO_LANGUAGE` | No | ✅ Yes | Env Var | `true` |
+| `AI_SETTINGS_TTL_MS` | No | ✅ Yes | Static | `60000` |
+
+\* Required only if AI features are desired (system works without AI)
 
 ---
 

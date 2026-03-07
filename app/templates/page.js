@@ -6,6 +6,7 @@ import Badge from '../components/common/Badge.jsx';
 import Modal from '../components/common/Modal.jsx';
 import Input from '../components/common/Input.jsx';
 import Loader from '../components/common/Loader.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
   faPlus,
@@ -190,18 +191,21 @@ export default function TemplatesPage() {
           />
           
           <div>
-            <label className="block text-sm font-semibold text-aa-text-dark mb-2">Category</label>
-            <select
+            <GeminiSelect
+              label="Category"
               value={newTemplate.category}
-              onChange={(e) => setNewTemplate({ ...newTemplate, category: e.target.value })}
-              className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg outline-none focus:border-aa-orange"
+              onChange={(value) => setNewTemplate({ ...newTemplate, category: value })}
+              name="template-category"
               required
-            >
-              <option value="">Select Category</option>
-              {categories.map(cat => (
-                <option key={cat} value={cat}>{cat.charAt(0).toUpperCase() + cat.slice(1)}</option>
-              ))}
-            </select>
+              options={[
+                { value: '', label: 'Select Category' },
+                ...categories.map((cat) => ({
+                  value: cat,
+                  label: cat.charAt(0).toUpperCase() + cat.slice(1),
+                })),
+              ]}
+              variant="warm"
+            />
           </div>
 
           <div>

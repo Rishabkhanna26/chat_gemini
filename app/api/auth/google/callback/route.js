@@ -118,7 +118,7 @@ export async function GET(request) {
     try {
       const [existing] = await connection.query(
         `SELECT id, name, email, phone, admin_tier, status,
-                business_category, business_type
+                business_category, business_type, booking_enabled
          FROM admins
          WHERE LOWER(email) = ?
          LIMIT 1`,
@@ -134,7 +134,7 @@ export async function GET(request) {
              business_category, business_type
            )
            VALUES (?, ?, ?, 'client_admin', 'inactive', 'general', 'both')
-           RETURNING id, name, email, phone, admin_tier, status, business_category, business_type`,
+           RETURNING id, name, email, phone, admin_tier, status, business_category, business_type, booking_enabled`,
           [displayName, placeholderPhone, email]
         );
         admin = rows[0];
@@ -154,6 +154,7 @@ export async function GET(request) {
         admin_tier: admin.admin_tier,
         business_category: admin.business_category,
         business_type: admin.business_type,
+        booking_enabled: admin.booking_enabled,
       });
 
       const response = NextResponse.redirect(buildRedirectUrl(request, '/'));

@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import Button from '../components/common/Button.jsx';
 import Input from '../components/common/Input.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faUserPlus, faEnvelope, faLock, faPhone, faUser } from '@fortawesome/free-solid-svg-icons';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
@@ -270,18 +271,19 @@ export default function SignupPage() {
                   </div>
 
                   <div className="w-full">
-                    <label className="mb-2 block text-sm font-semibold text-aa-text-dark">
-                      Business Type <span className="text-red-500">*</span>
-                    </label>
-                    <select
+                    <GeminiSelect
+                      label="Business Type *"
                       value={form.businessType}
-                      onChange={update('businessType')}
-                      className="auth-v3-select w-full rounded-lg border-2 border-gray-200 px-4 py-2.5 text-sm outline-none focus:border-aa-orange sm:py-3 sm:text-base"
-                    >
-                      <option value="both">Both (Product + Service)</option>
-                      <option value="product">Product-based</option>
-                      <option value="service">Service-based</option>
-                    </select>
+                      onChange={(value) =>
+                        setForm((prev) => ({ ...prev, businessType: value }))
+                      }
+                      options={[
+                        { value: 'both', label: 'Both (Product + Service)' },
+                        { value: 'product', label: 'Product-based' },
+                        { value: 'service', label: 'Service-based' },
+                      ]}
+                      variant="vibrant"
+                    />
                     <p className="mt-1 text-xs text-aa-gray">
                       We show only the modules your business needs.
                     </p>

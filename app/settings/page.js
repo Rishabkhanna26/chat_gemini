@@ -5,6 +5,7 @@ import Card from '../components/common/Card.jsx';
 import Button from '../components/common/Button.jsx';
 import Input from '../components/common/Input.jsx';
 import Badge from '../components/common/Badge.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
@@ -47,8 +48,12 @@ export default function SettingsPage() {
     name: '',
     email: '',
     phone: '',
+    business_name: '',
     business_category: '',
     business_type: 'both',
+    business_address: '',
+    business_hours: '',
+    business_map_url: '',
   });
   const [profilePhoto, setProfilePhoto] = useState(null);
   const [profilePhotoPreview, setProfilePhotoPreview] = useState(null);
@@ -58,6 +63,8 @@ export default function SettingsPage() {
   const [whatsappConnected, setWhatsappConnected] = useState(false);
   const [whatsappStatus, setWhatsappStatus] = useState('idle');
   const [whatsappQr, setWhatsappQr] = useState('');
+  const [whatsappPairingCode, setWhatsappPairingCode] = useState('');
+  const [whatsappPairingPhoneInput, setWhatsappPairingPhoneInput] = useState('');
   const [whatsappQrVersion, setWhatsappQrVersion] = useState(0);
   const whatsappQrJobRef = useRef(0);
   const [whatsappActionStatus, setWhatsappActionStatus] = useState('');
@@ -84,6 +91,10 @@ export default function SettingsPage() {
     setWhatsappQr(nextQr || '');
     setWhatsappQrVersion((prev) => prev + 1);
     whatsappQrJobRef.current += 1;
+  }, []);
+
+  const normalizePairingPhone = useCallback((value) => {
+    return String(value || '').replace(/\D/g, '').slice(0, 15);
   }, []);
 
   const fetchWhatsAppApi = useCallback(async (path, options = {}, retry = true) => {
@@ -159,8 +170,12 @@ export default function SettingsPage() {
         name: user.name || prev.name,
         email: user.email || prev.email,
         phone: user.phone || prev.phone,
+        business_name: user.business_name || prev.business_name,
         business_category: user.business_category || prev.business_category,
         business_type: user.business_type || prev.business_type,
+        business_address: user.business_address || prev.business_address,
+        business_hours: user.business_hours || prev.business_hours,
+        business_map_url: user.business_map_url || prev.business_map_url,
       }));
     }
   }, [user]);
@@ -173,26 +188,34 @@ export default function SettingsPage() {
         const contentType = response.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
           const text = await response.text();
-          throw new Error(text || 'Unexpected server response');
+          throw new Error(text || 'Something went wrong. Please try again.');
         }
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(data.error || 'Failed to load profile');
+          throw new Error(data.error || 'Could not load your profile.');
         }
         setProfile({
           name: data.data?.name || '',
           email: data.data?.email || '',
           phone: data.data?.phone || '',
+          business_name: data.data?.business_name || '',
           business_category: data.data?.business_category || '',
           business_type: data.data?.business_type || 'both',
+          business_address: data.data?.business_address || '',
+          business_hours: data.data?.business_hours || '',
+          business_map_url: data.data?.business_map_url || '',
         });
         setProfilePhotoPreview(data.data?.profile_photo_url || null);
         if (data.data?.whatsapp_number || data.data?.whatsapp_name) {
           setWhatsappConfig((prev) => ({
             ...prev,
             phone: data.data?.whatsapp_number || prev.phone,
-            businessName: data.data?.whatsapp_name || prev.businessName,
+            businessName:
+              data.data?.whatsapp_name || data.data?.business_name || prev.businessName,
           }));
+          setWhatsappPairingPhoneInput((prev) =>
+            prev || normalizePairingPhone(data.data?.whatsapp_number || '')
+          );
         }
       } catch (error) {
         console.error('Failed to load profile:', error);
@@ -208,7 +231,7 @@ export default function SettingsPage() {
       return;
     }
     loadProfile();
-  }, [authLoading, user]);
+  }, [authLoading, normalizePairingPhone, user]);
 
   useEffect(() => {
     setWhatsappConfig((prev) => ({
@@ -240,17 +263,28 @@ export default function SettingsPage() {
       setWhatsappConnected(derivedStatus === 'connected');
       if (derivedStatus === 'connected') {
         updateWhatsappQr('');
-      } else if (payload?.qrImage) {
-        updateWhatsappQr(payload.qrImage);
-      } else if (derivedStatus !== 'qr') {
+        setWhatsappPairingCode('');
+      } else if (payload?.pairingCode) {
         updateWhatsappQr('');
+        setWhatsappPairingCode(String(payload.pairingCode));
+        if (payload?.pairingPhoneNumber) {
+          setWhatsappPairingPhoneInput(
+            normalizePairingPhone(payload.pairingPhoneNumber)
+          );
+        }
+      } else if (payload?.qrImage) {
+        setWhatsappPairingCode('');
+        updateWhatsappQr(payload.qrImage);
+      } else if (derivedStatus !== 'qr' && derivedStatus !== 'code') {
+        updateWhatsappQr('');
+        setWhatsappPairingCode('');
       }
     } catch (error) {
       if (isMountedRef.current) {
-        setWhatsappActionStatus('Unable to fetch WhatsApp status.');
+        setWhatsappActionStatus('Could not load WhatsApp status.');
       }
     }
-  }, [fetchWhatsAppApi, user?.id]);
+  }, [fetchWhatsAppApi, normalizePairingPhone, updateWhatsappQr, user?.id]);
 
   useEffect(() => {
     const isMountedRef = { current: true };
@@ -284,15 +318,27 @@ export default function SettingsPage() {
           setWhatsappConnected(derivedStatus === 'connected');
           if (derivedStatus === 'connected') {
             updateWhatsappQr('');
-          } else if (payload?.qrImage) {
-            updateWhatsappQr(payload.qrImage);
-          } else if (derivedStatus !== 'qr') {
+            setWhatsappPairingCode('');
+          } else if (payload?.pairingCode) {
             updateWhatsappQr('');
+            setWhatsappPairingCode(String(payload.pairingCode));
+            if (payload?.pairingPhoneNumber) {
+              setWhatsappPairingPhoneInput(
+                normalizePairingPhone(payload.pairingPhoneNumber)
+              );
+            }
+          } else if (payload?.qrImage) {
+            setWhatsappPairingCode('');
+            updateWhatsappQr(payload.qrImage);
+          } else if (derivedStatus !== 'qr' && derivedStatus !== 'code') {
+            updateWhatsappQr('');
+            setWhatsappPairingCode('');
           }
         });
 
         socket.on('whatsapp:qr', (payload) => {
           if (!payload) return;
+          setWhatsappPairingCode('');
           if (typeof payload === 'string') {
             updateWhatsappQr(payload);
             return;
@@ -306,12 +352,31 @@ export default function SettingsPage() {
           }
         });
 
+        socket.on('whatsapp:code', (payload) => {
+          const code =
+            typeof payload === 'string'
+              ? payload.trim()
+              : String(payload?.code || '').trim();
+          if (!code) return;
+          setWhatsappStatus('code');
+          setWhatsappConnected(false);
+          updateWhatsappQr('');
+          setWhatsappPairingCode(code);
+          const incomingPhone =
+            typeof payload === 'object' && payload?.phoneNumber
+              ? normalizePairingPhone(payload.phoneNumber)
+              : '';
+          if (incomingPhone) {
+            setWhatsappPairingPhoneInput(incomingPhone);
+          }
+        });
+
         socket.on('connect_error', () => {
-          setWhatsappActionStatus('Unable to connect to WhatsApp service.');
+          setWhatsappActionStatus('Could not connect to WhatsApp.');
         });
       } catch (error) {
         if (!isMountedRef.current) return;
-        setWhatsappActionStatus('Unable to connect to WhatsApp service.');
+        setWhatsappActionStatus('Could not connect to WhatsApp.');
       }
     })();
 
@@ -319,19 +384,45 @@ export default function SettingsPage() {
       isMountedRef.current = false;
       if (socket) socket.disconnect();
     };
-  }, [fetchWhatsAppStatus, renderQrFromRaw, updateWhatsappQr, user?.id]);
+  }, [
+    fetchWhatsAppStatus,
+    normalizePairingPhone,
+    renderQrFromRaw,
+    updateWhatsappQr,
+    user?.id,
+  ]);
 
-  const handleStartWhatsApp = async () => {
+  const handleStartWhatsApp = async ({ usePairingCode = false } = {}) => {
     try {
       setWhatsappActionStatus('');
+      const pairingPhoneNumber = normalizePairingPhone(whatsappPairingPhoneInput);
+      if (usePairingCode && (pairingPhoneNumber.length < 8 || pairingPhoneNumber.length > 15)) {
+        throw new Error('Enter a valid phone number with country code. Use digits only.');
+      }
       const response = await fetchWhatsAppApi('/whatsapp/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adminId: user?.id }),
+        body: JSON.stringify({
+          adminId: user?.id,
+          authMethod: usePairingCode ? 'code' : 'qr',
+          ...(usePairingCode
+            ? {
+                phoneNumber: pairingPhoneNumber,
+              }
+            : {}),
+        }),
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to start WhatsApp');
+        throw new Error(payload?.error || 'Could not start WhatsApp.');
+      }
+      if (payload?.pairingCode) {
+        setWhatsappPairingCode(String(payload.pairingCode));
+      } else if (usePairingCode) {
+        setWhatsappPairingCode('');
+      }
+      if (usePairingCode) {
+        updateWhatsappQr('');
       }
       await fetchWhatsAppStatus();
     } catch (error) {
@@ -349,8 +440,10 @@ export default function SettingsPage() {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to disconnect WhatsApp');
+        throw new Error(payload?.error || 'Could not disconnect WhatsApp.');
       }
+      setWhatsappPairingCode('');
+      updateWhatsappQr('');
       await fetchWhatsAppStatus();
     } catch (error) {
       setWhatsappActionStatus(error.message);
@@ -360,37 +453,50 @@ export default function SettingsPage() {
   const tabs = [
     { id: 'profile', name: 'Profile', icon: faUser, hint: 'Identity and account data' },
     { id: 'appearance', name: 'Appearance', icon: faPalette, hint: 'Theme and accent colors' },
-    { id: 'whatsapp', name: 'WhatsApp', icon: faMobileScreen, hint: 'Connection and QR pairing' },
-    { id: 'security', name: 'Security', icon: faShieldHalved, hint: 'Password and sessions' },
+    { id: 'whatsapp', name: 'WhatsApp', icon: faMobileScreen, hint: 'Connect and link' },
+    { id: 'security', name: 'Security', icon: faShieldHalved, hint: 'Password and login' },
   ];
 
   const activeTabMeta = tabs.find((tab) => tab.id === activeTab) || tabs[0];
 
-  const isWhatsappPending = whatsappStatus === 'starting' || whatsappStatus === 'qr';
-  const canDisconnect = whatsappConnected || whatsappStatus === 'connected_other';
+  const isWhatsappPending =
+    whatsappStatus === 'starting' ||
+    whatsappStatus === 'qr' ||
+    whatsappStatus === 'code';
+  const isStartBlocked =
+    whatsappConnected ||
+    whatsappStatus === 'connected_other' ||
+    whatsappStatus === 'starting';
+  const canDisconnect = Boolean(
+    whatsappStatus && !['idle', 'disconnected'].includes(whatsappStatus)
+  );
   const whatsappTone = whatsappConnected ? 'green' : isWhatsappPending ? 'amber' : 'red';
   const whatsappStatusLabel = whatsappConnected
-    ? 'Configured'
+    ? 'Connected'
     : whatsappStatus === 'connected_other'
-    ? 'Connected (Other Admin)'
+    ? 'Connected (Another Admin)'
     : whatsappStatus === 'starting'
     ? 'Starting'
     : whatsappStatus === 'qr'
-    ? 'Awaiting Scan'
+    ? 'Waiting for QR Scan'
+    : whatsappStatus === 'code'
+    ? 'Waiting for Link Code Confirm'
     : whatsappStatus === 'auth_failure'
-    ? 'Auth Failed'
+    ? 'Login Failed'
     : 'Disconnected';
   const whatsappStatusMessage = whatsappConnected
-    ? 'WhatsApp is connected and configured for this admin.'
+    ? 'WhatsApp is connected for this admin.'
     : whatsappStatus === 'connected_other'
     ? 'WhatsApp is connected under a different admin account.'
     : whatsappStatus === 'starting'
-    ? 'Starting WhatsApp client. Please wait...'
+    ? 'Starting WhatsApp. Please wait...'
     : whatsappStatus === 'qr'
     ? 'Scan the QR code below with WhatsApp to connect.'
+    : whatsappStatus === 'code'
+    ? 'Use the code below in WhatsApp > Linked Devices > Link with phone number.'
     : whatsappStatus === 'auth_failure'
-    ? 'Authentication failed. Please reconnect.'
-    : 'WhatsApp client is currently disconnected.';
+    ? 'Login failed. Please connect again.'
+    : 'WhatsApp is not connected right now.';
 
   return (
     <div
@@ -527,6 +633,12 @@ export default function SettingsPage() {
                         </span>
                       </div>
                       <div className="flex flex-col gap-1 rounded-xl bg-white/90 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                        <span className="text-sm text-aa-gray">Business Name</span>
+                        <span className="text-sm font-semibold text-aa-text-dark sm:text-right break-words">
+                          {profile.business_name || 'Not added'}
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-1 rounded-xl bg-white/90 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
                         <span className="text-sm text-aa-gray">Business Category</span>
                         <span className="text-sm font-semibold text-aa-text-dark sm:text-right break-words">
                           {profile.business_category || 'General'}
@@ -569,6 +681,14 @@ export default function SettingsPage() {
                         placeholder="Enter your email"
                       />
                       <Input
+                        label="Business Name"
+                        value={profile.business_name}
+                        onChange={(event) =>
+                          setProfile((prev) => ({ ...prev, business_name: event.target.value }))
+                        }
+                        placeholder="Enter your shop or business name"
+                      />
+                      <Input
                         label="Phone"
                         value={profile.phone}
                         onChange={(event) => setProfile((prev) => ({ ...prev, phone: event.target.value }))}
@@ -592,26 +712,52 @@ export default function SettingsPage() {
                         </p>
                       </div>
                       <div className="w-full">
-                        <label className="mb-2 block text-sm font-semibold text-aa-text-dark">
-                          Business Type <span className="text-red-500">*</span>
-                        </label>
-                        <select
+                        <GeminiSelect
+                          label="Business Type *"
                           value={profile.business_type}
-                          onChange={(event) =>
-                            setProfile((prev) => ({ ...prev, business_type: event.target.value }))
+                          onChange={(value) =>
+                            setProfile((prev) => ({ ...prev, business_type: value }))
                           }
-                          className="w-full rounded-lg border-2 border-gray-200 px-4 py-2.5 text-sm outline-none focus:border-aa-orange sm:py-3 sm:text-base"
-                        >
-                          {BUSINESS_TYPE_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
+                          options={BUSINESS_TYPE_OPTIONS}
+                          variant="vibrant"
+                        />
                         <p className="mt-1 text-xs text-aa-gray">
                           Product-based shows orders, service-based shows appointments, both shows both.
                         </p>
                       </div>
+                      <div className="md:col-span-2">
+                        <label className="mb-2 block text-sm font-semibold text-aa-text-dark">
+                          Business Address
+                        </label>
+                        <textarea
+                          value={profile.business_address}
+                          onChange={(event) =>
+                            setProfile((prev) => ({ ...prev, business_address: event.target.value }))
+                          }
+                          placeholder="Add your exact showroom / office / shop address for WhatsApp AI replies"
+                          rows={3}
+                          className="w-full rounded-lg border-2 border-gray-200 px-4 py-3 text-sm outline-none focus:border-aa-orange sm:text-base"
+                        />
+                        <p className="mt-1 text-xs text-aa-gray">
+                          Customers asking for location or address will get this exact detail.
+                        </p>
+                      </div>
+                      <Input
+                        label="Business Hours"
+                        value={profile.business_hours}
+                        onChange={(event) =>
+                          setProfile((prev) => ({ ...prev, business_hours: event.target.value }))
+                        }
+                        placeholder="10 AM to 7 PM, Monday to Saturday"
+                      />
+                      <Input
+                        label="Map URL"
+                        value={profile.business_map_url}
+                        onChange={(event) =>
+                          setProfile((prev) => ({ ...prev, business_map_url: event.target.value }))
+                        }
+                        placeholder="https://maps.google.com/..."
+                      />
                     </div>
                   )}
                 </div>
@@ -640,14 +786,18 @@ export default function SettingsPage() {
                           const response = await fetch('/api/profile', { credentials: 'include' });
                           const data = await response.json();
                           if (!response.ok) {
-                            throw new Error(data.error || 'Failed to reset');
+                            throw new Error(data.error || 'Could not reset.');
                           }
                           setProfile({
                             name: data.data?.name || '',
                             email: data.data?.email || '',
                             phone: data.data?.phone || '',
+                            business_name: data.data?.business_name || '',
                             business_category: data.data?.business_category || '',
                             business_type: data.data?.business_type || 'both',
+                            business_address: data.data?.business_address || '',
+                            business_hours: data.data?.business_hours || '',
+                            business_map_url: data.data?.business_map_url || '',
                           });
                           setProfilePhoto(null);
                           setProfilePhotoPreview(data.data?.profile_photo_url || null);
@@ -677,7 +827,7 @@ export default function SettingsPage() {
                             });
                             const photoData = await photoResponse.json().catch(() => ({}));
                             if (!photoResponse.ok) {
-                              throw new Error(photoData.error || 'Failed to upload photo.');
+                              throw new Error(photoData.error || 'Could not upload photo.');
                             }
                             if (photoData?.url) {
                               setProfilePhotoPreview(photoData.url);
@@ -691,25 +841,33 @@ export default function SettingsPage() {
                             body: JSON.stringify({
                               name: profile.name,
                               email: profile.email,
+                              business_name: profile.business_name,
                               business_category: profile.business_category,
                               business_type: profile.business_type,
+                              business_address: profile.business_address,
+                              business_hours: profile.business_hours,
+                              business_map_url: profile.business_map_url,
                             }),
                           });
                           const contentType = response.headers.get('content-type') || '';
                           if (!contentType.includes('application/json')) {
                             const text = await response.text();
-                            throw new Error(text || 'Unexpected server response');
+                            throw new Error(text || 'Something went wrong. Please try again.');
                           }
                           const data = await response.json();
                           if (!response.ok) {
-                            throw new Error(data.error || 'Failed to save');
+                            throw new Error(data.error || 'Could not save.');
                           }
                           setProfile({
                             name: data.data?.name || '',
                             email: data.data?.email || '',
                             phone: data.data?.phone || '',
+                            business_name: data.data?.business_name || '',
                             business_category: data.data?.business_category || '',
                             business_type: data.data?.business_type || 'both',
+                            business_address: data.data?.business_address || '',
+                            business_hours: data.data?.business_hours || '',
+                            business_map_url: data.data?.business_map_url || '',
                           });
                           await refresh();
                           setSaveStatus('Profile updated.');
@@ -843,9 +1001,9 @@ export default function SettingsPage() {
           {activeTab === 'whatsapp' && (
             <Card className="border border-white/70 bg-white/90 backdrop-blur">
               <div className="mb-6">
-                <h2 className="text-xl sm:text-2xl font-bold text-aa-dark-blue">WhatsApp Configuration</h2>
+                <h2 className="text-xl sm:text-2xl font-bold text-aa-dark-blue">WhatsApp Setup</h2>
                 <p className="mt-1 text-sm text-aa-gray">
-                  Connect your WhatsApp account to sync chats inside inbox.
+                  Link your WhatsApp so chats appear in Inbox.
                 </p>
               </div>
 
@@ -885,15 +1043,23 @@ export default function SettingsPage() {
                     <div className="flex flex-col gap-2 sm:flex-row">
                       <Button
                         variant="primary"
-                        onClick={handleStartWhatsApp}
-                        disabled={whatsappConnected || whatsappStatus === 'starting'}
+                        onClick={() => handleStartWhatsApp({ usePairingCode: false })}
+                        disabled={isStartBlocked}
                         className="w-full sm:w-auto"
                       >
                         {whatsappConnected
-                          ? 'Configured'
+                          ? 'Connected'
                           : whatsappStatus === 'starting'
                           ? 'Starting...'
-                          : 'Connect WhatsApp'}
+                          : 'Connect with QR'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => handleStartWhatsApp({ usePairingCode: true })}
+                        disabled={isStartBlocked}
+                        className="w-full sm:w-auto"
+                      >
+                        Get Link Code
                       </Button>
                       <Button
                         variant="outline"
@@ -967,9 +1133,39 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-4 sm:p-5">
-                    <p className="text-xs uppercase tracking-wide text-aa-gray">QR Pairing</p>
+                    <p className="text-xs uppercase tracking-wide text-aa-gray">Link Options</p>
+
+                    <div className="mt-3">
+                      <Input
+                        label="Phone Number for Link Code"
+                        value={whatsappPairingPhoneInput}
+                        onChange={(event) =>
+                          setWhatsappPairingPhoneInput(
+                            normalizePairingPhone(event.target.value)
+                          )
+                        }
+                        placeholder="e.g. 919876543210"
+                        disabled={isStartBlocked}
+                      />
+                      <p className="mt-1 text-xs text-aa-gray">
+                        Enter country code and number with digits only.
+                      </p>
+                    </div>
+
+                    {whatsappPairingCode && !whatsappConnected ? (
+                      <div className="mt-4 rounded-xl border border-aa-orange/30 bg-aa-orange/5 px-4 py-3">
+                        <p className="text-xs uppercase tracking-wide text-aa-gray">Link Code</p>
+                        <p className="mt-2 text-2xl font-bold tracking-[0.2em] text-aa-dark-blue">
+                          {whatsappPairingCode}
+                        </p>
+                        <p className="mt-2 text-xs text-aa-gray">
+                          WhatsApp &gt; Linked Devices &gt; Link with phone number instead.
+                        </p>
+                      </div>
+                    ) : null}
+
                     {!whatsappConnected && whatsappQr ? (
-                      <div className="mt-3 flex flex-col items-center gap-3">
+                      <div className="mt-4 flex flex-col items-center gap-3">
                         <img
                           key={whatsappQrVersion}
                           src={whatsappQr}
@@ -981,8 +1177,8 @@ export default function SettingsPage() {
                         </p>
                       </div>
                     ) : (
-                      <div className="mt-3 rounded-xl bg-gray-50 px-4 py-10 text-center text-sm text-aa-gray">
-                        QR will appear here when connection starts.
+                      <div className="mt-4 rounded-xl bg-gray-50 px-4 py-8 text-center text-sm text-aa-gray">
+                        QR code or link code will show here after you start.
                       </div>
                     )}
                   </div>
@@ -1034,9 +1230,9 @@ export default function SettingsPage() {
           {activeTab === 'security' && (
             <Card className="border border-white/70 bg-white/90 backdrop-blur">
               <div className="mb-6">
-                <h2 className="text-xl sm:text-2xl font-bold text-aa-dark-blue">Security Settings</h2>
+                <h2 className="text-xl sm:text-2xl font-bold text-aa-dark-blue">Login & Security</h2>
                 <p className="mt-1 text-sm text-aa-gray">
-                  Manage password and active access to your account.
+                  Change your password and keep your account safe.
                 </p>
               </div>
 
@@ -1097,7 +1293,7 @@ export default function SettingsPage() {
                           });
                           const data = await response.json();
                           if (!response.ok) {
-                            throw new Error(data.error || 'Failed to update password.');
+                            throw new Error(data.error || 'Could not update password.');
                           }
                           setPasswordForm({ current: '', next: '', confirm: '' });
                           setPasswordStatus('Password updated.');
@@ -1125,16 +1321,16 @@ export default function SettingsPage() {
                 </section>
 
                 <section className="rounded-2xl border border-gray-200 bg-white p-4 sm:p-5">
-                  <h3 className="text-base font-semibold text-aa-text-dark">Two-Factor Authentication</h3>
+                  <h3 className="text-base font-semibold text-aa-text-dark">Extra Login Security (2FA)</h3>
                   <div className="mt-3 flex flex-col gap-3 rounded-xl bg-gray-50 p-4 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                      <p className="font-semibold text-aa-text-dark">Enable 2FA</p>
+                      <p className="font-semibold text-aa-text-dark">Turn on 2-step login</p>
                       <p className="mt-1 text-sm text-aa-gray">
-                        Add an extra layer of security to your account.
+                        Add one more check during login.
                       </p>
                     </div>
                     <Button variant="outline" className="w-full sm:w-auto">
-                      Enable
+                      Turn On
                     </Button>
                   </div>
                 </section>

@@ -22,10 +22,18 @@ import {
 } from '@fortawesome/free-solid-svg-icons';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
 import Card from '../components/common/Card.jsx';
+import Badge from '../components/common/Badge.jsx';
 import Modal from '../components/common/Modal.jsx';
 import Input from '../components/common/Input.jsx';
 import Button from '../components/common/Button.jsx';
-import { getBusinessTypeLabel, hasServiceAccess } from '../../lib/business.js';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
+import {
+  getAppointmentCapabilityLabel,
+  getBusinessTypeLabel,
+  hasAppointmentAccess,
+  hasBookingAccess,
+  hasServiceAccess,
+} from '../../lib/business.js';
 
 export default function AppointmentsPage() {
   const router = useRouter();
@@ -62,6 +70,7 @@ export default function AppointmentsPage() {
     id: null,
     user_id: '',
     status: 'booked',
+    appointment_kind: 'service',
     appointment_type: '',
     start_time: '',
     end_time: '',
@@ -73,9 +82,21 @@ export default function AppointmentsPage() {
     payment_services: [],
   });
 
-  const hasAppointmentsAccess = Boolean(user?.id) && hasServiceAccess(user);
+  const hasAppointmentsAccess = Boolean(user?.id) && hasAppointmentAccess(user);
+  const canUseServiceAppointments = Boolean(user?.id) && hasServiceAccess(user);
+  const canUseBookingAppointments = Boolean(user?.id) && hasBookingAccess(user);
   const label = useMemo(() => 'Appointments', []);
   const labelLower = label.toLowerCase();
+  const contactOptions = useMemo(
+    () => [
+      { value: '', label: 'Select existing contact' },
+      ...contacts.map((contact) => ({
+        value: String(contact.id),
+        label: `${contact.name || 'Unknown'} • ${contact.phone || '—'}`,
+      })),
+    ],
+    [contacts]
+  );
 
   useEffect(() => {
     if (!hasAppointmentsAccess) {
@@ -157,15 +178,35 @@ export default function AppointmentsPage() {
       params.set('type', 'service');
       params.set('status', 'active');
       params.set('limit', '500');
-      const response = await fetch(`/api/catalog?${params.toString()}`, {
-        credentials: 'include',
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to load services');
+
+      const requests = [
+        fetch(`/api/catalog?${params.toString()}`, {
+          credentials: 'include',
+        }),
+      ];
+      if (canUseBookingAppointments) {
+        requests.push(
+          fetch('/api/bookings?status=active&limit=500', {
+            credentials: 'include',
+          })
+        );
       }
-      const list = Array.isArray(data?.data) ? data.data : [];
-      const sorted = list
+
+      const responses = await Promise.all(requests);
+      const payloads = await Promise.all(responses.map((response) => response.json().catch(() => ({}))));
+      const failed = responses.findIndex((response) => !response.ok);
+      if (failed >= 0) {
+        throw new Error(payloads[failed]?.error || 'Failed to load catalog items');
+      }
+
+      const merged = payloads.flatMap((payload) => (Array.isArray(payload?.data) ? payload.data : []));
+      const deduped = new Map();
+      merged.forEach((item) => {
+        const key = `${String(item?.name || '').trim().toLowerCase()}::${String(item?.price_label || '').trim().toLowerCase()}`;
+        if (!key || key === '::') return;
+        deduped.set(key, item);
+      });
+      const sorted = Array.from(deduped.values())
         .filter((item) => item?.name)
         .sort((a, b) => String(a.name).localeCompare(String(b.name)));
       setCatalogServices(sorted);
@@ -287,6 +328,23 @@ export default function AppointmentsPage() {
     return { total, paid, due };
   };
 
+  const getAppointmentKind = (appt) => {
+    const kind = String(appt?.appointment_kind || '').trim().toLowerCase();
+    if (kind === 'booking') return 'booking';
+    return 'service';
+  };
+
+  const getAppointmentKindLabel = (appt) =>
+    getAppointmentKind(appt) === 'booking' ? 'Booking' : 'Service';
+
+  const getAppointmentKindVariant = (appt) =>
+    getAppointmentKind(appt) === 'booking' ? 'yellow' : 'blue';
+
+  const getDefaultAppointmentKind = () => {
+    if (canUseBookingAppointments && !canUseServiceAppointments) return 'booking';
+    return 'service';
+  };
+
   const toInputNumber = (value) => {
     if (value === null || value === undefined || value === '') return '';
     return String(value);
@@ -388,6 +446,7 @@ export default function AppointmentsPage() {
       id: appt.id,
       user_id: appt.user_id || '',
       status: appt.status || 'booked',
+      appointment_kind: getAppointmentKind(appt),
       appointment_type: appt.appointment_type || '',
       start_time: toInputDateTime(appt.start_time),
       end_time: toInputDateTime(appt.end_time),
@@ -413,6 +472,7 @@ export default function AppointmentsPage() {
       id: null,
       user_id: '',
       status: 'booked',
+      appointment_kind: getDefaultAppointmentKind(),
       appointment_type: '',
       start_time: toInputDateTime(now),
       end_time: toInputDateTime(end),
@@ -527,6 +587,7 @@ export default function AppointmentsPage() {
     try {
       const payload = {
         status: editForm.status,
+        appointment_kind: editForm.appointment_kind,
         appointment_type: editForm.appointment_type,
         payment_total: editForm.payment_total === '' ? null : Number(editForm.payment_total),
         payment_paid: editForm.payment_paid === '' ? null : Number(editForm.payment_paid),
@@ -814,8 +875,8 @@ export default function AppointmentsPage() {
           </div>
           <h1 className="text-2xl font-bold text-aa-dark-blue mb-2">Appointments are not enabled</h1>
           <p className="text-aa-gray">
-            Appointments are available only for service-based businesses. Your current type is{' '}
-            <span className="font-semibold">{getBusinessTypeLabel(user)}</span>.
+            Appointments are available for service-based businesses or admins with booking access.
+            Your current business type is <span className="font-semibold">{getBusinessTypeLabel(user)}</span>.
           </p>
           <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-center">
             <Button variant="primary" onClick={() => router.push('/settings')}>
@@ -954,12 +1015,17 @@ export default function AppointmentsPage() {
                     <span className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor(appt.status)}`}>
                       {String(appt.status || 'booked').replace('_', ' ').toUpperCase()}
                     </span>
+                    <Badge variant={getAppointmentKindVariant(appt)}>
+                      {getAppointmentKindLabel(appt).toUpperCase()}
+                    </Badge>
                     <span className={`px-3 py-1 rounded-full text-xs font-semibold ${getPaymentBadge(getPaymentStatus(appt))}`}>
                       {getPaymentStatus(appt).toUpperCase()}
                     </span>
                   </div>
                   <p className="text-sm text-gray-600">{appt.phone || '—'}</p>
-                  <p className="text-gray-700 mt-2">{appt.appointment_type || label.slice(0, -1)}</p>
+                  <p className="text-gray-700 mt-2">
+                    {appt.appointment_type || getAppointmentKindLabel(appt)}
+                  </p>
                   <div className="flex flex-wrap gap-4 text-sm mt-3">
                     <span className="text-gray-500 flex items-center gap-2">
                       <FontAwesomeIcon icon={faClock} />
@@ -1031,11 +1097,16 @@ export default function AppointmentsPage() {
                         </span>
                       </div>
                       <div className="mt-3 text-sm text-aa-text-dark">
-                        {appt.appointment_type || label.slice(0, -1)}
+                        {appt.appointment_type || getAppointmentKindLabel(appt)}
                       </div>
-                      <div className="mt-2 text-xs text-aa-gray">
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-aa-gray">
+                        <Badge variant={getAppointmentKindVariant(appt)}>
+                          {getAppointmentKindLabel(appt)}
+                        </Badge>
+                        <span>
                         {appt.start_time ? new Date(appt.start_time).toLocaleDateString() : '—'} •{' '}
                         {appt.start_time ? new Date(appt.start_time).toLocaleTimeString() : '—'}
+                        </span>
                       </div>
                       <div className="mt-3 flex items-center justify-between gap-2">
                         {renderStatusStacked(
@@ -1114,18 +1185,15 @@ export default function AppointmentsPage() {
                 </div>
                 {!createContactMode ? (
                   <>
-                    <select
-                      value={editForm.user_id}
-                      onChange={handleEditChange('user_id')}
-                      className="w-full px-4 py-2.5 sm:py-3 text-sm sm:text-base border-2 border-gray-200 rounded-lg outline-none focus:border-aa-orange"
-                    >
-                      <option value="">Select existing contact</option>
-                      {contacts.map((contact) => (
-                        <option key={contact.id} value={contact.id}>
-                          {contact.name || 'Unknown'} • {contact.phone || '—'}
-                        </option>
-                      ))}
-                    </select>
+                    <GeminiSelect
+                      label="Existing Contact"
+                      value={String(editForm.user_id || '')}
+                      onChange={(value) =>
+                        setEditForm((prev) => ({ ...prev, user_id: value }))
+                      }
+                      options={contactOptions}
+                      variant="warm"
+                    />
                     {contactsLoading && (
                       <p className="text-xs text-aa-gray mt-2">Loading contacts...</p>
                     )}
@@ -1158,11 +1226,45 @@ export default function AppointmentsPage() {
                 )}
               </div>
             )}
+            <div>
+              <label className="block text-sm font-semibold text-aa-text-dark mb-2">Record Type</label>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {canUseServiceAppointments && (
+                  <button
+                    type="button"
+                    onClick={() => setEditForm((prev) => ({ ...prev, appointment_kind: 'service' }))}
+                    className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                      editForm.appointment_kind === 'service'
+                        ? 'border-aa-dark-blue bg-aa-dark-blue text-white'
+                        : 'border-gray-200 text-aa-gray hover:border-aa-orange hover:text-aa-orange'
+                    }`}
+                  >
+                    Service
+                  </button>
+                )}
+                {canUseBookingAppointments && (
+                  <button
+                    type="button"
+                    onClick={() => setEditForm((prev) => ({ ...prev, appointment_kind: 'booking' }))}
+                    className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                      editForm.appointment_kind === 'booking'
+                        ? 'border-aa-orange bg-aa-orange text-white'
+                        : 'border-gray-200 text-aa-gray hover:border-aa-orange hover:text-aa-orange'
+                    }`}
+                  >
+                    Booking
+                  </button>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-aa-gray">
+                This admin can currently use {getAppointmentCapabilityLabel(user)} records.
+              </p>
+            </div>
             <Input
-              label="Appointment Type"
+              label={editForm.appointment_kind === 'booking' ? 'Booking Name' : 'Appointment Type'}
               value={editForm.appointment_type}
               onChange={handleEditChange('appointment_type')}
-              placeholder="Consultation"
+              placeholder={editForm.appointment_kind === 'booking' ? 'Deluxe Room' : 'Consultation'}
             />
             <div>
               <label className="block text-sm font-semibold text-aa-text-dark mb-2">Status</label>

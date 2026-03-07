@@ -6,6 +6,7 @@ import Badge from '../components/common/Badge.jsx';
 import Modal from '../components/common/Modal.jsx';
 import Input from '../components/common/Input.jsx';
 import Loader from '../components/common/Loader.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
   faPaperPlane,
@@ -346,17 +347,18 @@ export default function BroadcastPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-semibold text-aa-text-dark mb-2">Target Audience</label>
-            <select
+            <GeminiSelect
+              label="Target Audience"
               value={newBroadcast.target_audience}
-              onChange={(e) => setNewBroadcast({ ...newBroadcast, target_audience: e.target.value })}
-              className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg outline-none focus:border-aa-orange"
-            >
-              <option value="all">All Contacts</option>
-              <option value="vip">VIP Contacts</option>
-              <option value="new">New Contacts</option>
-              <option value="interested">Interested Contacts</option>
-            </select>
+              onChange={(value) => setNewBroadcast({ ...newBroadcast, target_audience: value })}
+              options={[
+                { value: 'all', label: 'All Contacts' },
+                { value: 'vip', label: 'VIP Contacts' },
+                { value: 'new', label: 'New Contacts' },
+                { value: 'interested', label: 'Interested Contacts' },
+              ]}
+              variant="warm"
+            />
           </div>
 
           <Input

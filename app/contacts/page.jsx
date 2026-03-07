@@ -215,14 +215,14 @@ export default function ContactsPage() {
       });
       const data = await response.json();
       if (!response.ok || data?.success === false) {
-        throw new Error(data?.error || 'Failed to update automation setting');
+        throw new Error(data?.error || 'Could not update auto-reply setting.');
       }
       const updated = data?.data || {};
       setUsers((prev) => prev.map((item) => (item.id === user.id ? { ...item, ...updated } : item)));
       setSelectedUser((prev) => (prev?.id === user.id ? { ...prev, ...updated } : prev));
       setChatUser((prev) => (prev?.id === user.id ? { ...prev, ...updated } : prev));
     } catch (error) {
-      window.alert(error.message || 'Failed to update automation setting.');
+      window.alert(error.message || 'Could not update auto-reply setting.');
     } finally {
       setAutomationUpdatingId(null);
     }
@@ -292,8 +292,8 @@ export default function ContactsPage() {
                 <div className="mt-3 pt-3 border-t">
                   <p className="text-xs text-gray-500">Assigned to: <span className="font-semibold">{user.admin_name}</span></p>
                   <p className="text-xs text-gray-500 mt-1">
-                    Automation: <span className={`font-semibold ${user.automation_disabled ? 'text-red-600' : 'text-green-600'}`}>
-                      {user.automation_disabled ? 'Disabled' : 'Enabled'}
+                    Auto Reply: <span className={`font-semibold ${user.automation_disabled ? 'text-red-600' : 'text-green-600'}`}>
+                      {user.automation_disabled ? 'Off' : 'On'}
                     </span>
                   </p>
                 </div>
@@ -324,8 +324,8 @@ export default function ContactsPage() {
                 {automationUpdatingId === user.id
                   ? 'Updating...'
                   : user.automation_disabled
-                    ? 'Enable Automation'
-                    : 'Disable Automation'}
+                    ? 'Turn On Auto Reply'
+                    : 'Turn Off Auto Reply'}
               </button>
             </div>
           ))
@@ -364,7 +364,7 @@ export default function ContactsPage() {
                 <p className="text-xl font-bold text-aa-dark-blue">{selectedUser.name || 'Unknown'}</p>
                 <p className="text-sm text-aa-gray">{selectedUser.admin_name ? `Assigned to ${selectedUser.admin_name}` : 'Unassigned'}</p>
                 <p className={`text-xs mt-1 font-semibold ${selectedUser.automation_disabled ? 'text-red-600' : 'text-green-600'}`}>
-                  Automation {selectedUser.automation_disabled ? 'Disabled' : 'Enabled'}
+                  Auto Reply {selectedUser.automation_disabled ? 'Off' : 'On'}
                 </p>
               </div>
             </div>
@@ -381,8 +381,8 @@ export default function ContactsPage() {
               {automationUpdatingId === selectedUser.id
                 ? 'Updating...'
                 : selectedUser.automation_disabled
-                  ? 'Enable Automation for This Lead'
-                  : 'Disable Automation for This Lead'}
+                  ? 'Turn On Auto Reply for This Lead'
+                  : 'Turn Off Auto Reply for This Lead'}
             </button>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

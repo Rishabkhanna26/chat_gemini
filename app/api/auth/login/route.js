@@ -60,7 +60,7 @@ export async function POST(request) {
 
       const [users] = await connection.execute(
         `SELECT id, name, email, phone, password_hash, admin_tier, status,
-                business_category, business_type, access_expires_at
+                business_category, business_type, booking_enabled, access_expires_at
          FROM admins
          WHERE LOWER(email) = ?${phoneClause} OR id = ?
          LIMIT 1`,
@@ -102,6 +102,7 @@ export async function POST(request) {
         admin_tier: user.admin_tier,
         business_category: user.business_category,
         business_type: user.business_type,
+        booking_enabled: user.booking_enabled,
         access_expires_at: user.access_expires_at,
       });
 
@@ -114,6 +115,7 @@ export async function POST(request) {
           admin_tier: user.admin_tier,
           business_category: user.business_category,
           business_type: user.business_type,
+          booking_enabled: user.booking_enabled,
           access_expires_at: user.access_expires_at,
         },
       });

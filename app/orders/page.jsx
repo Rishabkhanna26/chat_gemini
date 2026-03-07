@@ -14,6 +14,7 @@ import {
   faLocationDot,
   faUser,
   faClipboardList,
+  faTrashCan,
 } from '@fortawesome/free-solid-svg-icons';
 import Card from '../components/common/Card.jsx';
 import Button from '../components/common/Button.jsx';
@@ -21,6 +22,7 @@ import Badge from '../components/common/Badge.jsx';
 import Modal from '../components/common/Modal.jsx';
 import Input from '../components/common/Input.jsx';
 import Loader from '../components/common/Loader.jsx';
+import GeminiSelect from '../components/common/GeminiSelect.jsx';
 import { useAuth } from '../components/auth/AuthProvider.jsx';
 import { getBusinessTypeLabel, hasProductAccess } from '../../lib/business.js';
 
@@ -57,6 +59,64 @@ const DATE_RANGES = {
   '90days': 90,
   all: null,
 };
+
+const ORDER_STATUS_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'new', label: 'New' },
+  { value: 'confirmed', label: 'Confirmed' },
+  { value: 'processing', label: 'Processing' },
+  { value: 'packed', label: 'Packed' },
+  { value: 'out_for_delivery', label: 'Out for delivery' },
+  { value: 'fulfilled', label: 'Fulfilled' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+const ORDER_STATUS_CONTROL_OPTIONS = ORDER_STATUS_OPTIONS.filter((option) => option.value !== 'all').concat([
+  { value: 'refunded', label: 'Refunded' },
+]);
+
+const PAYMENT_FILTER_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'partial', label: 'Partial' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'paid', label: 'Paid' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'refunded', label: 'Refunded' },
+];
+
+const PAYMENT_CONTROL_OPTIONS = [
+  { value: 'pending', label: 'Pending' },
+  { value: 'paid', label: 'Paid' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'refunded', label: 'Refunded' },
+];
+
+const FULFILLMENT_FILTER_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'unfulfilled', label: 'Unfulfilled' },
+  { value: 'packed', label: 'Packed' },
+  { value: 'shipped', label: 'Shipped' },
+  { value: 'delivered', label: 'Delivered' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+const FULFILLMENT_CONTROL_OPTIONS = FULFILLMENT_FILTER_OPTIONS.filter(
+  (option) => option.value !== 'all'
+);
+
+const CHANNEL_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'whatsapp', label: 'WhatsApp' },
+  { value: 'instagram', label: 'Instagram' },
+  { value: 'website', label: 'Website' },
+];
+
+const RANGE_OPTIONS = [
+  { value: '7days', label: 'Last 7 days' },
+  { value: '30days', label: 'Last 30 days' },
+  { value: '90days', label: 'Last 90 days' },
+  { value: 'all', label: 'All time' },
+];
 
 const formatCurrency = (value = 0, currency = 'INR') => {
   const numeric = Number(value);
@@ -154,6 +214,16 @@ const extractPaymentReference = (notes) => {
   return '';
 };
 
+const getPaymentReference = (order) => {
+  const explicit = String(
+    order?.payment_transaction_id || order?.payment_gateway_payment_id || ''
+  ).trim();
+  if (explicit) return explicit;
+  return extractPaymentReference(order?.payment_notes);
+};
+
+const getPaymentLinkId = (order) => String(order?.payment_link_id || '').trim();
+
 export default function OrdersPage() {
   const router = useRouter();
   const { user, loading: authLoading } = useAuth();
@@ -177,6 +247,7 @@ export default function OrdersPage() {
   const [paymentLinkFeedback, setPaymentLinkFeedback] = useState({ type: '', text: '' });
   const [paymentLinkScheduleAt, setPaymentLinkScheduleAt] = useState('');
   const [paymentLinkTimerMinutes, setPaymentLinkTimerMinutes] = useState('');
+  const [deletingOrderId, setDeletingOrderId] = useState(null);
 
   const hasOrderAccess = Boolean(user?.id) && hasProductAccess(user);
 
@@ -191,14 +262,14 @@ export default function OrdersPage() {
         const message = contentType.includes('application/json')
           ? (await response.json()).error
           : await response.text();
-        throw new Error(message || 'Failed to load orders');
+        throw new Error(message || 'Could not load orders.');
       }
       const data = contentType.includes('application/json') ? await response.json() : {};
       setOrders(Array.isArray(data?.data) ? data.data : []);
       setSyncWarning('');
     } catch (err) {
       setOrders([]);
-      setError(err.message || 'Orders API is not available yet.');
+      setError(err.message || 'Could not load orders right now.');
     } finally {
       setLoading(false);
     }
@@ -263,6 +334,9 @@ export default function OrdersPage() {
         order.status,
         order.payment_status,
         order.fulfillment_status,
+        order.payment_transaction_id,
+        order.payment_gateway_payment_id,
+        order.payment_link_id,
         itemNames,
       ]
         .filter(Boolean)
@@ -320,6 +394,17 @@ export default function OrdersPage() {
     setActiveOrder((prev) => (prev?.id === orderId ? snapshot : prev));
   };
 
+  const removeOrderFromState = (orderId) => {
+    setOrders((prev) => prev.filter((order) => order.id !== orderId));
+    setSelectedIds((prev) => {
+      if (!prev.has(orderId)) return prev;
+      const next = new Set(prev);
+      next.delete(orderId);
+      return next;
+    });
+    setActiveOrder((prev) => (prev?.id === orderId ? null : prev));
+  };
+
   const updateOrder = async (orderId, updates) => {
     const previousSnapshot = orders.find((order) => order.id === orderId) || null;
     applyOrderUpdate(orderId, updates);
@@ -332,7 +417,7 @@ export default function OrdersPage() {
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null);
-        throw new Error(data?.error || 'Unable to sync order changes yet.');
+        throw new Error(data?.error || 'Could not save order changes right now.');
       }
       const data = await response.json();
       if (data?.data) {
@@ -341,13 +426,40 @@ export default function OrdersPage() {
       setSyncWarning('');
     } catch (err) {
       restoreOrderSnapshot(orderId, previousSnapshot);
-      setSyncWarning(err.message || 'Orders API not connected. Changes saved locally.');
+      setSyncWarning(err.message || 'Could not reach server. Changes are only on this screen right now.');
     }
   };
 
   const bulkUpdate = (updates) => {
     selectedIds.forEach((orderId) => updateOrder(orderId, updates));
     setSelectedIds(new Set());
+  };
+
+  const deleteOrder = async (order) => {
+    if (!order?.id) return;
+    const label = order.order_number || `#${order.id}`;
+    const confirmed = window.confirm(
+      `Delete order ${label}? This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setDeletingOrderId(order.id);
+    setSyncWarning('');
+    try {
+      const response = await fetch(`/api/orders/${order.id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success === false) {
+        throw new Error(payload?.error || 'Unable to delete order.');
+      }
+      removeOrderFromState(order.id);
+    } catch (err) {
+      setSyncWarning(err.message || 'Unable to delete order.');
+    } finally {
+      setDeletingOrderId(null);
+    }
   };
 
   const addNote = () => {
@@ -606,87 +718,54 @@ export default function OrdersPage() {
             </div>
           </div>
           <div className="lg:col-span-2">
-            <label className="text-xs font-semibold text-aa-gray uppercase">Status</label>
-            <select
+            <GeminiSelect
+              label="Status"
               value={filters.status}
-              onChange={(event) =>
-                setFilters((prev) => ({ ...prev, status: event.target.value }))
-              }
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
-            >
-              <option value="all">All</option>
-              <option value="new">New</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="processing">Processing</option>
-              <option value="packed">Packed</option>
-              <option value="out_for_delivery">Out for delivery</option>
-              <option value="fulfilled">Fulfilled</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
+              onChange={(value) => setFilters((prev) => ({ ...prev, status: value }))}
+              options={ORDER_STATUS_OPTIONS}
+              size="sm"
+              variant="warm"
+            />
           </div>
           <div className="lg:col-span-2">
-            <label className="text-xs font-semibold text-aa-gray uppercase">Payment</label>
-            <select
+            <GeminiSelect
+              label="Payment"
               value={filters.payment}
-              onChange={(event) =>
-                setFilters((prev) => ({ ...prev, payment: event.target.value }))
-              }
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
-            >
-              <option value="all">All</option>
-              <option value="partial">Partial</option>
-              <option value="pending">Pending</option>
-              <option value="paid">Paid</option>
-              <option value="failed">Failed</option>
-              <option value="refunded">Refunded</option>
-            </select>
+              onChange={(value) => setFilters((prev) => ({ ...prev, payment: value }))}
+              options={PAYMENT_FILTER_OPTIONS}
+              size="sm"
+              variant="warm"
+            />
           </div>
           <div className="lg:col-span-2">
-            <label className="text-xs font-semibold text-aa-gray uppercase">Fulfillment</label>
-            <select
+            <GeminiSelect
+              label="Fulfillment"
               value={filters.fulfillment}
-              onChange={(event) =>
-                setFilters((prev) => ({ ...prev, fulfillment: event.target.value }))
-              }
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
-            >
-              <option value="all">All</option>
-              <option value="unfulfilled">Unfulfilled</option>
-              <option value="packed">Packed</option>
-              <option value="shipped">Shipped</option>
-              <option value="delivered">Delivered</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
+              onChange={(value) => setFilters((prev) => ({ ...prev, fulfillment: value }))}
+              options={FULFILLMENT_FILTER_OPTIONS}
+              size="sm"
+              variant="warm"
+            />
           </div>
           <div className="lg:col-span-2">
-            <label className="text-xs font-semibold text-aa-gray uppercase">Channel</label>
-            <select
+            <GeminiSelect
+              label="Channel"
               value={filters.channel}
-              onChange={(event) =>
-                setFilters((prev) => ({ ...prev, channel: event.target.value }))
-              }
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
-            >
-              <option value="all">All</option>
-              <option value="whatsapp">WhatsApp</option>
-              <option value="instagram">Instagram</option>
-              <option value="website">Website</option>
-            </select>
+              onChange={(value) => setFilters((prev) => ({ ...prev, channel: value }))}
+              options={CHANNEL_OPTIONS}
+              size="sm"
+              variant="warm"
+            />
           </div>
           <div className="lg:col-span-2">
-            <label className="text-xs font-semibold text-aa-gray uppercase">Range</label>
-            <select
+            <GeminiSelect
+              label="Range"
               value={filters.range}
-              onChange={(event) =>
-                setFilters((prev) => ({ ...prev, range: event.target.value }))
-              }
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
-            >
-              <option value="7days">Last 7 days</option>
-              <option value="30days">Last 30 days</option>
-              <option value="90days">Last 90 days</option>
-              <option value="all">All time</option>
-            </select>
+              onChange={(value) => setFilters((prev) => ({ ...prev, range: value }))}
+              options={RANGE_OPTIONS}
+              size="sm"
+              variant="vibrant"
+            />
           </div>
         </div>
       </Card>
@@ -812,12 +891,21 @@ export default function OrdersPage() {
                           {formatDateTime(order.placed_at || order.created_at)}
                         </td>
                         <td className="py-3 px-3">
-                          <button
-                            className="text-aa-orange font-semibold text-sm hover:underline"
-                            onClick={() => setActiveOrder(order)}
-                          >
-                            View
-                          </button>
+                          <div className="flex items-center gap-3">
+                            <button
+                              className="text-aa-orange font-semibold text-sm hover:underline"
+                              onClick={() => setActiveOrder(order)}
+                            >
+                              View
+                            </button>
+                            <button
+                              className="text-red-600 font-semibold text-sm hover:underline disabled:opacity-60"
+                              onClick={() => deleteOrder(order)}
+                              disabled={deletingOrderId === order.id}
+                            >
+                              {deletingOrderId === order.id ? 'Deleting...' : 'Delete'}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -867,12 +955,21 @@ export default function OrdersPage() {
                     <p className="font-semibold text-aa-text-dark">
                       {formatCurrency(getOrderTotal(order), order.currency || 'INR')}
                     </p>
-                    <button
-                      className="text-aa-orange font-semibold text-sm hover:underline"
-                      onClick={() => setActiveOrder(order)}
-                    >
-                      View
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        className="text-aa-orange font-semibold text-sm hover:underline"
+                        onClick={() => setActiveOrder(order)}
+                      >
+                        View
+                      </button>
+                      <button
+                        className="text-red-600 font-semibold text-sm hover:underline disabled:opacity-60"
+                        onClick={() => deleteOrder(order)}
+                        disabled={deletingOrderId === order.id}
+                      >
+                        {deletingOrderId === order.id ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
                   </div>
                 </Card>
               );
@@ -993,7 +1090,13 @@ export default function OrdersPage() {
                     <div>
                       <p className="text-xs uppercase text-aa-gray">Transaction / Proof ID</p>
                       <p className="mt-1 text-aa-text-dark break-all">
-                        {extractPaymentReference(activeOrder.payment_notes) || '—'}
+                        {getPaymentReference(activeOrder) || '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase text-aa-gray">Payment Link ID</p>
+                      <p className="mt-1 text-aa-text-dark break-all">
+                        {getPaymentLinkId(activeOrder) || '—'}
                       </p>
                     </div>
                   </div>
@@ -1052,52 +1155,38 @@ export default function OrdersPage() {
                   <p className="text-sm font-semibold text-aa-text-dark mb-3">Order Controls</p>
                   <div className="space-y-3">
                     <div>
-                      <label className="text-xs font-semibold uppercase text-aa-gray">Status</label>
-                      <select
+                      <GeminiSelect
+                        label="Status"
                         value={activeOrder.status || 'new'}
-                        onChange={(event) => updateOrder(activeOrder.id, { status: event.target.value })}
-                        className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                      >
-                        <option value="new">New</option>
-                        <option value="confirmed">Confirmed</option>
-                        <option value="processing">Processing</option>
-                        <option value="packed">Packed</option>
-                        <option value="out_for_delivery">Out for delivery</option>
-                        <option value="fulfilled">Fulfilled</option>
-                        <option value="cancelled">Cancelled</option>
-                        <option value="refunded">Refunded</option>
-                      </select>
+                        onChange={(value) => updateOrder(activeOrder.id, { status: value })}
+                        options={ORDER_STATUS_CONTROL_OPTIONS}
+                        size="sm"
+                        variant="warm"
+                      />
                     </div>
                     <div>
-                      <label className="text-xs font-semibold uppercase text-aa-gray">Payment</label>
-                      <select
+                      <GeminiSelect
+                        label="Payment"
                         value={activeOrder.payment_status || 'pending'}
-                        onChange={(event) =>
-                          updateOrder(activeOrder.id, { payment_status: event.target.value })
+                        onChange={(value) =>
+                          updateOrder(activeOrder.id, { payment_status: value })
                         }
-                        className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                      >
-                        <option value="pending">Pending</option>
-                        <option value="paid">Paid</option>
-                        <option value="failed">Failed</option>
-                        <option value="refunded">Refunded</option>
-                      </select>
+                        options={PAYMENT_CONTROL_OPTIONS}
+                        size="sm"
+                        variant="warm"
+                      />
                     </div>
                     <div>
-                      <label className="text-xs font-semibold uppercase text-aa-gray">Fulfillment</label>
-                      <select
+                      <GeminiSelect
+                        label="Fulfillment"
                         value={activeOrder.fulfillment_status || 'unfulfilled'}
-                        onChange={(event) =>
-                          updateOrder(activeOrder.id, { fulfillment_status: event.target.value })
+                        onChange={(value) =>
+                          updateOrder(activeOrder.id, { fulfillment_status: value })
                         }
-                        className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                      >
-                        <option value="unfulfilled">Unfulfilled</option>
-                        <option value="packed">Packed</option>
-                        <option value="shipped">Shipped</option>
-                        <option value="delivered">Delivered</option>
-                        <option value="cancelled">Cancelled</option>
-                      </select>
+                        options={FULFILLMENT_CONTROL_OPTIONS}
+                        size="sm"
+                        variant="warm"
+                      />
                     </div>
                     <div>
                       <label className="text-xs font-semibold uppercase text-aa-gray">Assignee</label>
@@ -1141,6 +1230,17 @@ export default function OrdersPage() {
                       className="sm:col-span-2"
                     >
                       {sendingPaymentLink ? 'Sending payment link...' : 'Send Remaining Payment Link'}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="sm:col-span-2 border-red-200 text-red-700 hover:bg-red-50"
+                      onClick={() => deleteOrder(activeOrder)}
+                      disabled={deletingOrderId === activeOrder.id}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <FontAwesomeIcon icon={faTrashCan} />
+                        {deletingOrderId === activeOrder.id ? 'Deleting Order...' : 'Delete Order'}
+                      </span>
                     </Button>
                   </div>
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-2">

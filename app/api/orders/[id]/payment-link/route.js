@@ -305,6 +305,7 @@ export async function POST(request, context) {
       {
         payment_notes: paymentNotes,
         payment_currency: currency,
+        payment_link_id: paymentLink.id,
       },
       adminScopeId
     );

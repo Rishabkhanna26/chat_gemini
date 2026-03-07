@@ -8,6 +8,14 @@ const DEFAULTS = Object.freeze({
   ai_prompt: '',
   ai_blocklist: '',
   automation_enabled: true,
+  whatsapp_pending_recovery_enabled: true,
+  whatsapp_only_post_config_messages: true,
+  whatsapp_preconfig_message_grace_ms: 30000,
+  whatsapp_recovery_window_hours: 24,
+  whatsapp_recovery_batch_limit: 20,
+  whatsapp_recovery_analysis_message_limit: 18,
+  whatsapp_recovery_ai_required: true,
+  whatsapp_recovery_ai_model: '',
   appointment_start_hour: 9,
   appointment_end_hour: 20,
   appointment_slot_minutes: 60,
@@ -48,6 +56,22 @@ export async function PUT(request) {
     const ai_blocklist = typeof body.ai_blocklist === 'string' ? body.ai_blocklist : undefined;
     const automation_enabled =
       typeof body.automation_enabled === 'boolean' ? body.automation_enabled : undefined;
+    const whatsapp_pending_recovery_enabled =
+      typeof body.whatsapp_pending_recovery_enabled === 'boolean'
+        ? body.whatsapp_pending_recovery_enabled
+        : undefined;
+    const whatsapp_only_post_config_messages =
+      typeof body.whatsapp_only_post_config_messages === 'boolean'
+        ? body.whatsapp_only_post_config_messages
+        : undefined;
+    const whatsapp_recovery_ai_required =
+      typeof body.whatsapp_recovery_ai_required === 'boolean'
+        ? body.whatsapp_recovery_ai_required
+        : undefined;
+    const whatsapp_recovery_ai_model =
+      typeof body.whatsapp_recovery_ai_model === 'string'
+        ? body.whatsapp_recovery_ai_model.trim().slice(0, 120)
+        : undefined;
     const startHour = parseBoundedInteger(body.appointment_start_hour, { min: 0, max: 23 });
     if (startHour.error) {
       return Response.json(
@@ -76,6 +100,49 @@ export async function PUT(request) {
         { status: 400 }
       );
     }
+    const preconfigGraceMs = parseBoundedInteger(body.whatsapp_preconfig_message_grace_ms, {
+      min: 0,
+      max: 300000,
+    });
+    if (preconfigGraceMs.error) {
+      return Response.json(
+        { success: false, error: `whatsapp_preconfig_message_grace_ms: ${preconfigGraceMs.error}` },
+        { status: 400 }
+      );
+    }
+    const recoveryWindowHours = parseBoundedInteger(body.whatsapp_recovery_window_hours, {
+      min: 1,
+      max: 168,
+    });
+    if (recoveryWindowHours.error) {
+      return Response.json(
+        { success: false, error: `whatsapp_recovery_window_hours: ${recoveryWindowHours.error}` },
+        { status: 400 }
+      );
+    }
+    const recoveryBatchLimit = parseBoundedInteger(body.whatsapp_recovery_batch_limit, {
+      min: 1,
+      max: 200,
+    });
+    if (recoveryBatchLimit.error) {
+      return Response.json(
+        { success: false, error: `whatsapp_recovery_batch_limit: ${recoveryBatchLimit.error}` },
+        { status: 400 }
+      );
+    }
+    const recoveryAnalysisLimit = parseBoundedInteger(
+      body.whatsapp_recovery_analysis_message_limit,
+      { min: 6, max: 80 }
+    );
+    if (recoveryAnalysisLimit.error) {
+      return Response.json(
+        {
+          success: false,
+          error: `whatsapp_recovery_analysis_message_limit: ${recoveryAnalysisLimit.error}`,
+        },
+        { status: 400 }
+      );
+    }
 
     const finalStartHour =
       startHour.provided && startHour.value !== undefined ? startHour.value : undefined;
@@ -99,6 +166,27 @@ export async function PUT(request) {
       ai_prompt,
       ai_blocklist,
       automation_enabled,
+      whatsapp_pending_recovery_enabled,
+      whatsapp_only_post_config_messages,
+      whatsapp_preconfig_message_grace_ms:
+        preconfigGraceMs.provided && preconfigGraceMs.value !== undefined
+          ? preconfigGraceMs.value
+          : undefined,
+      whatsapp_recovery_window_hours:
+        recoveryWindowHours.provided && recoveryWindowHours.value !== undefined
+          ? recoveryWindowHours.value
+          : undefined,
+      whatsapp_recovery_batch_limit:
+        recoveryBatchLimit.provided && recoveryBatchLimit.value !== undefined
+          ? recoveryBatchLimit.value
+          : undefined,
+      whatsapp_recovery_analysis_message_limit:
+        recoveryAnalysisLimit.provided && recoveryAnalysisLimit.value !== undefined
+          ? recoveryAnalysisLimit.value
+          : undefined,
+      whatsapp_recovery_ai_required,
+      whatsapp_recovery_ai_model:
+        whatsapp_recovery_ai_model !== undefined ? whatsapp_recovery_ai_model : undefined,
       appointment_start_hour: finalStartHour,
       appointment_end_hour: finalEndHour,
       appointment_slot_minutes:

@@ -1,16 +1,17 @@
 import { requireAuth } from '../../../../lib/auth-server';
 import { updateAppointment } from '../../../../lib/db-helpers';
-import { hasServiceAccess } from '../../../../lib/business.js';
+import { hasAppointmentAccess, hasBookingAccess, hasServiceAccess } from '../../../../lib/business.js';
 
 const ALLOWED_STATUSES = new Set(['booked', 'completed', 'cancelled']);
 const ALLOWED_PAYMENT_METHODS = new Set(['cash', 'card', 'upi', 'bank', 'wallet', 'other', '']);
+const ALLOWED_APPOINTMENT_KINDS = new Set(['service', 'booking']);
 
 export async function PATCH(request, context) {
   try {
     const authUser = await requireAuth();
-    if (!hasServiceAccess(authUser)) {
+    if (!hasAppointmentAccess(authUser)) {
       return Response.json(
-        { success: false, error: 'Appointments are disabled for this business type.' },
+        { success: false, error: 'Appointments are disabled for this admin.' },
         { status: 403 }
       );
     }
@@ -33,6 +34,20 @@ export async function PATCH(request, context) {
 
     if (Object.prototype.hasOwnProperty.call(body, 'appointment_type')) {
       updates.appointment_type = String(body?.appointment_type || '').trim() || null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'appointment_kind')) {
+      const appointmentKind = String(body?.appointment_kind || '').trim().toLowerCase();
+      if (!ALLOWED_APPOINTMENT_KINDS.has(appointmentKind)) {
+        return Response.json({ success: false, error: 'Invalid appointment kind' }, { status: 400 });
+      }
+      if (appointmentKind === 'booking' && !hasBookingAccess(authUser)) {
+        return Response.json({ success: false, error: 'Booking access is not enabled.' }, { status: 403 });
+      }
+      if (appointmentKind === 'service' && !hasServiceAccess(authUser)) {
+        return Response.json({ success: false, error: 'Service appointments are disabled for this admin.' }, { status: 403 });
+      }
+      updates.appointment_kind = appointmentKind;
     }
 
     if (Object.prototype.hasOwnProperty.call(body, 'start_time')) {

@@ -57,7 +57,7 @@ export async function GET(request, { params }) {
       return Response.json({ success: false, error: 'Invalid item id.' }, { status: 400 });
     }
     const item = await getCatalogItemById(itemId, user.id);
-    if (!item) {
+    if (!item || item.is_booking_item) {
       return Response.json({ success: false, error: 'Item not found.' }, { status: 404 });
     }
     return Response.json({ success: true, data: item });
@@ -78,6 +78,11 @@ export async function PUT(request, { params }) {
       return Response.json({ success: false, error: 'Invalid item id.' }, { status: 400 });
     }
 
+    const existing = await getCatalogItemById(itemId, user.id);
+    if (!existing || existing.is_booking_item) {
+      return Response.json({ success: false, error: 'Item not found.' }, { status: 404 });
+    }
+
     const body = await request.json();
     const updates = {};
 
@@ -93,6 +98,11 @@ export async function PUT(request, { params }) {
         );
       }
       updates.item_type = itemType;
+      if (itemType === 'product') {
+        updates.is_bookable = false;
+        updates.is_time_based = false;
+        updates.is_booking_item = false;
+      }
     }
 
     if (Object.prototype.hasOwnProperty.call(body, 'name')) {
@@ -156,9 +166,14 @@ export async function PUT(request, { params }) {
       const value = parseBoolean(body?.is_bookable);
       if (value !== undefined) updates.is_bookable = value;
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'is_time_based')) {
+      const value = parseBoolean(body?.is_time_based);
+      if (value !== undefined) updates.is_time_based = value;
+    }
+    updates.is_booking_item = false;
 
     const item = await updateCatalogItem(itemId, user.id, updates);
-    if (!item) {
+    if (!item || item.is_booking_item) {
       return Response.json({ success: false, error: 'Item not found.' }, { status: 404 });
     }
     return Response.json({ success: true, data: item });
@@ -177,6 +192,10 @@ export async function DELETE(request, { params }) {
     const itemId = parseId(resolvedParams?.id);
     if (!itemId) {
       return Response.json({ success: false, error: 'Invalid item id.' }, { status: 400 });
+    }
+    const existing = await getCatalogItemById(itemId, user.id);
+    if (!existing || existing.is_booking_item) {
+      return Response.json({ success: false, error: 'Item not found.' }, { status: 404 });
     }
     const deleted = await deleteCatalogItem(itemId, user.id);
     if (!deleted) {

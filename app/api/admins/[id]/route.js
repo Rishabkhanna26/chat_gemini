@@ -19,6 +19,8 @@ export async function PATCH(req, context) {
     const status = body?.status;
     const business_type = body?.business_type;
     const business_category = body?.business_category;
+    const booking_enabled =
+      typeof body?.booking_enabled === 'boolean' ? body.booking_enabled : undefined;
     const access_duration_value = Number(body?.access_duration_value || 0);
     const access_duration_unit =
       String(body?.access_duration_unit || 'days').toLowerCase() === 'months'
@@ -98,6 +100,7 @@ export async function PATCH(req, context) {
       admin_tier,
       status,
       business_type,
+      booking_enabled,
       business_category: typeof business_category === 'string' ? business_category : undefined,
       access_expires_at,
     });
